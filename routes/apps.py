@@ -12,7 +12,7 @@ import subprocess
 import requests
 from urllib.parse import urlparse
 
-BASE_APPS_DIR = "/opt/apps"
+BASE_APPS_DIR = Path("/opt/apps")
 
 router = APIRouter(
     prefix="/apps",
@@ -26,7 +26,13 @@ def get_db():
     finally:
         db.close()
 
+# dependencies
 db_dependency = Annotated[Session, Depends(get_db)]
+
+
+## request models 
+class AppStatusUpdate(BaseModel):
+    status: str = Field(description="Status of Application")
 
 
 class AppRequestModel(BaseModel):
@@ -51,6 +57,9 @@ class AppDetail(AppListItem):
     internal_port: int
     created_at: datetime
     updated_at: datetime
+
+
+# >>>>>>>>>>>>> End response models <<<<<<<<<<<<<<<<<<<<
 
 
 def validate_github_repo(url: str) -> bool:
@@ -130,7 +139,7 @@ def validate_github_repo(repo_url: str) -> None:
     response = requests.get(api_url, timeout=5)
 
     if response.status_code == 404:
-        raise ValueError("Repository does not exist")
+        raise PermissionError("Private repositories are not supported")
 
     if response.status_code != 200:
         raise RuntimeError("Failed to fetch repository metadata")
@@ -201,10 +210,6 @@ def deploy_app(db: db_dependency, app_id: int = Path(gt=0)):
     }
 
 
-class AppStatusUpdate(BaseModel):
-    status: str = Field(description="Status of Application")
-
-
 @router.put("/{app_id}/update_status", status_code=status.HTTP_201_CREATED)
 def update_app_status(db: db_dependency, app_id: int = Path(gt=0), status: AppStatusUpdate = Body(...)):
     app = db.query(AppModel).filter(AppModel.id == app_id).first()
@@ -218,4 +223,3 @@ def update_app_status(db: db_dependency, app_id: int = Path(gt=0), status: AppSt
         "id": app.id,
         "status": app.status.value
     }
-    
