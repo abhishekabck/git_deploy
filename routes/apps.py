@@ -159,10 +159,6 @@ def deploy_app(db: db_dependency, app_id: int = ApiPath(gt=0)):
         logger.error("Deployment failed: App %s not found.", app_id)
         raise HTTPException(status_code=404, detail="App not found")
 
-    if app.status == AppStatus.RUNNING:
-        logger.warning("Deployment aborted: App %s is already running.", app_id)
-        raise HTTPException(status_code=400, detail="App is already running")
-
     app_dir = BASE_APPS_DIR / f"app-{app.id}"
     logger.info("Ensuring directory exists: %s", app_dir)
     app_dir.mkdir(parents=True, exist_ok=True)
@@ -202,10 +198,27 @@ def deploy_app(db: db_dependency, app_id: int = ApiPath(gt=0)):
             status_code=500,
             detail=f"{e}"
         )
-    
-    app.status = AppStatus.PREPARED
-    logger.info("App %s state updated to PREPARED.", app_id)
-    db.commit()
+
+    # docker run
+    try:
+        logger.info("Initiating Docker Run Logic!")
+        docker_run(app, app_dir)
+        logger.info(f"Application Successfully Started at port {app.internal_port}")
+        app.status = AppStatus.RUNNING
+        logger.info("App %s state updated to RUNNING.", app_id)
+        db.commit()
+    except FileNotFoundError as e:
+        app.status = AppStatus.ERROR
+        db.commit()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+    except RuntimeError as e:
+        app.status = AppStatus.ERROR
+        db.commit()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+    except Exception as e:
+        app.status = AppStatus.ERROR
+        db.commit()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
     return {
         "id": app.id,
