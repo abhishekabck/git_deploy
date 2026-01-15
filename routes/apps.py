@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends
 from fastapi import Path as ApiPath
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from typing import Annotated, List
+from typing import Annotated, List, Optional
 from starlette import status
 from database import SessionLocal
 from models import AppModel, AppStatus
@@ -38,12 +38,18 @@ db_dependency = Annotated[Session, Depends(get_db)]
 
 class AppRequestModel(BaseModel):
     repo_url: str = Field(description="Repository URL")
+    branch: Optional[str] = Field(default="main", description="Branch to checkout")
+    build_path: Optional[str] = Field(default=".", description="Path to build project from")
+    dockerfile_path: Optional[str] = Field(default="Dockerfile", description="Dockerfile path")
     container_port: int = Field(gt=1023, lt=65536, description="Project Port")
 
     model_config = {
         "json_schema_extra": {
             "example": {
                 "repo_url": "https://github.com/{username}/{repo_name}.git",
+                "branch": "main",
+                "build_path": ".",
+                "dockerfile_path": "Dockerfile",
                 "container_port": 8000,
             }
         }
@@ -65,8 +71,15 @@ class AppListItem(BaseModel):
     status: str
 
 class AppDetail(AppListItem):
+    id: int
     repo_url: str
     internal_port: int
+    container_port: int
+    subdomain: str
+    branch: str
+    build_path: str
+    dockerfile_path: str
+    status: str
     created_at: datetime
     updated_at: datetime
 
@@ -143,6 +156,9 @@ def get_app(db: db_dependency, app_id: int = ApiPath(gt=0)):
         'subdomain': app.subdomain,
         'internal_port': app.internal_port,
         'container_port': app.container_port,
+        'branch': app.branch,
+        'build_path': app.build_path,
+        'dockerfile_path': app.dockerfile_path,
         'status': app.status.value,
         'created_at': app.created_at,
         'updated_at': app.updated_at
@@ -224,3 +240,4 @@ def deploy_app(db: db_dependency, app_id: int = ApiPath(gt=0)):
         "id": app.id,
         "status": app.status.value
     }
+
