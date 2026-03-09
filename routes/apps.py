@@ -5,6 +5,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from typing import Annotated, List, Optional
 from starlette import status
+
+from Errors import (InvalidRepoURLError,
+                    MalformedRepoURLError,
+                    UnexpectedRepoURLFormatError,
+                    GitHubAPIConnectionError,
+                    GitHubAPIError, PrivateRepoNotSupportedError, RepoNotFoundOrPrivateError,
+                    )
 from database import SessionLocal
 from models import AppModel, AppStatus
 from datetime import datetime
@@ -67,8 +74,10 @@ class AppResponseModel(BaseModel):
 class AppListItem(BaseModel):
     id: int
     subdomain: str
-    container_port: int
+    internal_port: int
     status: str
+    build_path: str
+    repo_url: str
 
 class AppDetail(AppListItem):
     id: int
@@ -93,14 +102,32 @@ def create_app(model: AppRequestModel, db: db_dependency):
     try:
         logger.debug("Validating GitHub repository URL: %s", model.repo_url)
         validate_github_repo(model.repo_url)
-    except PermissionError as e:
+    except InvalidRepoURLError | MalformedRepoURLError | UnexpectedRepoURLFormatError as e:
+        logger.debug("Invalid GitHub repository URL: %s", model.repo_url)
+        raise HTTPException(status_code=400, detail="Invalid GitHub Repo Format.")
+    except GitHubAPIConnectionError | GitHubAPIError as err:
+        logger.debug("GitHub API connection error: %s", str(err))
+        raise HTTPException(status_code=500, detail="GitHub API Connection Error.")
+    except PrivateRepoNotSupportedError as e:
         logger.error("Permission error validating repo %s: %s", model.repo_url, str(e))
-        raise HTTPException(status_code=403, detail=str(e))
-    except ValueError as e:
+        raise HTTPException(status_code=403, detail="Private Error Not Supported.")
+    except RepoNotFoundOrPrivateError as e:
         logger.warning("Validation error for repo %s: %s", model.repo_url, str(e))
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail="Repo does not exists(Private repo are not supported).")
+    except Exception as e:
+        logger.error("Unexpected error validating repo %s: %s", model.repo_url, str(e))
+        raise HTTPException(status_code=500, detail="Internal Server Error.")
 
-    new_app = AppModel(repo_url=model.repo_url, status=AppStatus.CREATED, container_port=model.container_port)
+
+    new_app = AppModel(
+        repo_url=model.repo_url,
+        status=AppStatus.CREATED,
+        container_port=model.container_port,
+        internal_port=model.internal_port,
+        branch=model.branch,
+        build_path=model.build_path,
+        dockerfile_path=model.dockerfile_path
+    )
     db.add(new_app)
     db.flush()  ## i used because it attaches id without commiting
     
@@ -134,7 +161,9 @@ def get_apps(db: db_dependency):
             {
                 "id": app.id,
                 "subdomain": app.subdomain,
-                "container_port": app.container_port,
+                "internal_port": app.internal_port,
+                "repo_url": app.repo_url,
+                "build_path": app.build_path,
                 "status": app.status.value,
             }
         )
@@ -199,7 +228,7 @@ def deploy_app(db: db_dependency, app_id: int = ApiPath(gt=0)):
         docker_build(app, app_dir)
         logger.info("Docker build successful for app %s", app_id)
     except FileNotFoundError as e:
-        logger.error("Dockerfile missing for app %s", app_id)
+        logger.error("Dockerfile missing for app %s at %s", app_id, str(e))
         app.status = AppStatus.ERROR
         db.commit()
         raise HTTPException(

@@ -1,7 +1,16 @@
-import subprocess
-from models import AppModel
-from pathlib import Path
 import logging
+import subprocess
+from pathlib import Path
+from models import AppModel
+from Errors import (DockerRunError,
+                    DockerBuildError,
+                    DockerfileNotFoundError,
+                    DockerImageRemovalError,
+                    DockerImageNotFoundError,
+                    DockerContainerRemovalError,
+)
+
+
 
 logger = logging.getLogger(__name__)
 
@@ -58,11 +67,11 @@ def docker_build(app_model: AppModel, app_dir: Path):
     logger.info("Starting docker build process for app_id: %s, image_name: %s", app_model.id, image_name)
     
     # Validation
-    dockerfile_path = Path(app_dir) / "Dockerfile"
+    dockerfile_path = app_dir / Path(app_model.dockerfile_path)
     logger.debug("Checking for Dockerfile at: %s", dockerfile_path)
     if not dockerfile_path.is_file():
         logger.error("Dockerfile not found in %s", app_dir)
-        raise FileNotFoundError("Docker file does not exists.")
+        raise DockerfileNotFoundError(context=str(dockerfile_path))
 
     # checking if Image exists or not
     logger.debug("Checking for image: %s", image_name)
@@ -77,7 +86,7 @@ def docker_build(app_model: AppModel, app_dir: Path):
                 docker_remove_container(f"app_{app_model.id}_container", container_id)
                 logger.info("Container Removed Successfully!")
         except Exception as e:
-            raise RuntimeError(str(e))
+            raise DockerContainerRemovalError(context=str(e))
         logger.info("Removing old image with name: %s", image_name)
         result = subprocess.run(
             ["docker", "rmi", f"{image_name}:latest"],
@@ -87,12 +96,12 @@ def docker_build(app_model: AppModel, app_dir: Path):
         )
         if result.returncode != 0:
             logger.error("Failed! to remove Existing Docker image - %s:latest", image_name)
-            raise RuntimeError("Failed! to remove Existing docker image.")
+            raise DockerImageRemovalError(context=result.stderr)
         logger.info("Existing Docker image successfully Removed!")
     logger.info("No Existing Docker image Found with conflicting name - %s:latest", image_name)
     logger.info("Executing docker build command for %s", image_name)
     process = subprocess.Popen(
-        ["docker", "build", "--progress=plain", "-t", f"{image_name}", "."],
+        ["docker", "build", "--progress=plain","-f", f"{dockerfile_path}", "-t", f"{image_name}", f"{app_model.build_path}"],
         cwd=app_dir,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -107,7 +116,7 @@ def docker_build(app_model: AppModel, app_dir: Path):
 
     if exit_code != 0:
         logger.error("Docker build failed for %s with exit code %s", image_name, exit_code)
-        raise RuntimeError("Docker build failed")
+        raise DockerBuildError(context=f"Docker build failed with exit code {exit_code}")
     
     logger.info("Docker build completed successfully for %s", image_name)
 
@@ -119,7 +128,7 @@ def docker_run(app_model: AppModel, app_dir: Path):
     logger.info(f"Checking image: {image_name}")
     if not docker_image_exists(image_name):
         logger.error("Docker image - %s:latest not found!", image_name)
-        raise FileNotFoundError("Docker image does not Exists!")
+        raise DockerImageNotFoundError(context=str(image_name))
     logger.info("Required Image Exists!")
 
     logger.info("Checking if Container Exists!")
@@ -132,7 +141,7 @@ def docker_run(app_model: AppModel, app_dir: Path):
             logger.info("Successfully removed Docker Container.")
     except Exception as e:
         logger.error(e)
-        raise RuntimeError(e)
+        raise DockerContainerRemovalError(context=str(e))
     #verification phase completed
 
 
@@ -146,5 +155,5 @@ def docker_run(app_model: AppModel, app_dir: Path):
     )
     if result.returncode != 0:
         logger.error("Container Failed to Run with error %s", result.stderr)
-        raise RuntimeError("Failed to start Docker Image.")
+        raise DockerRunError(context=f"{result.stderr}")
     logger.info("Successfully Initiated docker container with container id: %s", result.stdout.rstrip())
