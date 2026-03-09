@@ -1,11 +1,11 @@
 from fastapi import FastAPI
-from routes import apps
-from Errors.app_errors import AppBaseError
-from Errors.exception_handler import app_error_handler
+import api
+from app.Errors.app_errors import AppBaseError
+from app.Errors.exception_handler import app_error_handler
 app = FastAPI()
-app.include_router(apps.router)
+app.include_router(api.router, prefix="/api")
 app.add_exception_handler(AppBaseError, app_error_handler)
-from database import engine, Base
+from app.database import engine, Base
 import logging
 
 
