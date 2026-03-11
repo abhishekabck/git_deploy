@@ -23,6 +23,8 @@ from app.Errors.app_errors import (
     DeployDockerRunError,
     DatabaseConnectionError,
     InternalServerError,
+    GitBranchNotFoundError,
+    NoAvailablePortError
 )
 
 from app.Errors.error_logger import log_error

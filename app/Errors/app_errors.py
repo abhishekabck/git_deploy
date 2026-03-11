@@ -85,6 +85,11 @@ class GitPullError(AppBaseError):
     message = "Git pull operation failed."
     status_code = 500
 
+class GitBranchNotFoundError(AppBaseError):
+    error_code = 1009
+    message = "Branch not found in the repository."
+    status_code = 404
+
 
 # ──────────────────────────────────────────────
 #  2xxx  –  Docker Errors
@@ -124,6 +129,12 @@ class DockerRunError(AppBaseError):
     error_code = 2005
     message = "Failed to start Docker container."
     status_code = 500
+
+
+class NoAvailablePortError(AppBaseError):
+    error_code = 2006
+    message = "No available port found in the configured range (10000-65535)."
+    status_code = 503
 
 
 # ──────────────────────────────────────────────

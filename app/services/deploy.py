@@ -12,6 +12,7 @@ from app.Errors import (InvalidRepoURLError,
                         PrivateRepoNotSupportedError,
                         GitCloneError,
                         GitPullError,
+                        GitBranchNotFoundError,
                         )
 
 logger = logging.getLogger(__name__)
@@ -94,3 +95,17 @@ def clone_or_pull_repo(repo_url: str, app_dir: Path) -> None:
             raise GitPullError(detail=result.stderr.strip(), context=repo_url)
     
     logger.info("Git operation finished successfully for %s", repo_url)
+
+
+def switch_to_branch(branch: str, app_dir: Path) -> None:
+    logger.info("Switching to branch %s", branch)
+    result = subprocess.run(
+        ["git", "checkout", branch],
+        cwd=app_dir,
+        capture_output=True,
+        text=True
+    )
+    if result.returncode != 0:
+        logger.error("Failed to switch to branch %s: %s", branch, result.stderr)
+        raise GitBranchNotFoundError(detail=result.stderr.strip(), context=branch)
+    logger.info("Branch %s switched successfully", branch)

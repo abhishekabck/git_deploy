@@ -1,5 +1,6 @@
 import logging
 import subprocess
+import time
 from pathlib import Path
 from app.models import AppModel
 from app.Errors import (DockerRunError,
@@ -9,7 +10,8 @@ from app.Errors import (DockerRunError,
                         DockerImageNotFoundError,
                         DockerContainerRemovalError,
                         )
-
+from app.services.deploy import switch_to_branch
+from app.services.docker_command_builder import DockerCommandBuilder
 
 
 logger = logging.getLogger(__name__)
@@ -43,6 +45,36 @@ def docker_container_exists(container_name: str, running_only: bool = False) -> 
     except subprocess.CalledProcessError:
         return ""
 
+def docker_remove_image(image_name: str):
+    try:
+        # Get all image IDs for this name across all tags
+        result = subprocess.run(
+            ["docker", "images", "-q", image_name],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        image_ids = [i for i in result.stdout.strip().split("\n") if i]
+        if not image_ids:
+            logger.info("Image '%s' does not exist, skipping removal.", image_name)
+            return
+        rm_result = subprocess.run(
+            ["docker", "rmi", "-f"] + image_ids,
+            capture_output=True,
+            text=True
+        )
+        if rm_result.returncode == 0:
+            logger.info("Image '%s' and all its tags removed successfully.", image_name)
+        else:
+            logger.error("Failed to remove image '%s': %s", image_name, rm_result.stderr.strip())
+            raise DockerImageRemovalError(context=image_name)
+    except DockerImageRemovalError:
+        raise
+    except subprocess.CalledProcessError as e:
+        logger.error("Error querying image '%s': %s", image_name, e)
+        raise DockerImageRemovalError(context=image_name)
+
+
 def docker_remove_container(container_name: str, container_id: str):
     try:
         if container_id:
@@ -62,10 +94,16 @@ def docker_remove_container(container_name: str, container_id: str):
         logger.error(f"Error checking container: {e}")
 
 
-def docker_build(app_model: AppModel, app_dir: Path):
+def docker_build(app_model: AppModel, app_dir: Path, **kwargs):
+    version_tag = str(int(time.time()))
     image_name = f"app_{app_model.id}_image"
+    tagged_image = f"{image_name}:{version_tag}"
+    latest_image = f"{image_name}:latest"
+
     logger.info("Starting docker build process for app_id: %s, image_name: %s", app_model.id, image_name)
-    
+    switch_to_branch(branch=app_model.branch, app_dir=app_dir)
+    logger.info("Switched to branch: %s", app_model.branch)
+
     # Validation
     dockerfile_path = app_dir / Path(app_model.dockerfile_path)
     logger.debug("Checking for Dockerfile at: %s", dockerfile_path)
@@ -73,35 +111,27 @@ def docker_build(app_model: AppModel, app_dir: Path):
         logger.error("Dockerfile not found in %s", app_dir)
         raise DockerfileNotFoundError(context=str(dockerfile_path))
 
-    # checking if Image exists or not
-    logger.debug("Checking for image: %s", image_name)
-    if docker_image_exists(image_name):
-        logger.info("Image: \"%s\" already Exists.", image_name)
-        logger.info("Checking for container to avoid conflicts..")
-        try:
-            container_id = docker_container_exists(f"app_{app_model.id}_container")
-            if container_id:
-                logger.info("Docker Container with cid %s found!", container_id)
-                logger.info("Removing Existing Container.")
-                docker_remove_container(f"app_{app_model.id}_container", container_id)
-                logger.info("Container Removed Successfully!")
-        except Exception as e:
-            raise DockerContainerRemovalError(context=str(e))
-        logger.info("Removing old image with name: %s", image_name)
-        result = subprocess.run(
-            ["docker", "rmi", f"{image_name}:latest"],
-            cwd=app_dir,
-            capture_output=True,
-            text=True
-        )
-        if result.returncode != 0:
-            logger.error("Failed! to remove Existing Docker image - %s:latest", image_name)
-            raise DockerImageRemovalError(context=result.stderr)
-        logger.info("Existing Docker image successfully Removed!")
-    logger.info("No Existing Docker image Found with conflicting name - %s:latest", image_name)
     logger.info("Executing docker build command for %s", image_name)
+    builder = DockerCommandBuilder()
+    build_cmd = (
+        builder
+        .build(build_context_path=app_model.build_path)
+        .pull_latest_base_image(should_pull=kwargs.get("pull_latest", False))
+        .with_tag(tagged_image)
+        .with_tag(latest_image)
+        .with_label("app_id", str(app_model.id))
+        .with_label("branch", app_model.branch)
+        .with_label("build_timestamp", version_tag)
+        .with_progress("plain")
+        .with_dockerfile(dockerfile_path)
+        .without_cache(no_cache=kwargs.get("clear_cache", False))
+        )
+    if kwargs.get('build_args'):
+        for key, value in kwargs['build_args'].items():
+            build_cmd = build_cmd.with_build_arg(key, value)
+
     process = subprocess.Popen(
-        ["docker", "build", "--progress=plain","-f", f"{dockerfile_path}", "-t", f"{image_name}", f"{app_model.build_path}"],
+        args = build_cmd.compile(),
         cwd=app_dir,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -120,15 +150,19 @@ def docker_build(app_model: AppModel, app_dir: Path):
     
     logger.info("Docker build completed successfully for %s", image_name)
 
-def docker_run(app_model: AppModel, app_dir: Path):
-    logger.info("#"*40)
-    image_name = f"app_{app_model.id}_image"
-    container_name=f"app_{app_model.id}_container"
 
-    logger.info(f"Checking image: {image_name}")
+def docker_run(app_model: AppModel, app_dir: Path, **kwargs):
+    image_name = f"app_{app_model.id}_image"
+    container_name = f"app_{app_model.id}_container"
+
+    # Allows falling back to a specific tag if provided, otherwise uses 'latest'
+    target_tag = kwargs.get("tag", "latest")
+    full_image_target = f"{image_name}:{target_tag}"
+
+    logger.info(f"Checking image: {full_image_target}")
     if not docker_image_exists(image_name):
-        logger.error("Docker image - %s:latest not found!", image_name)
-        raise DockerImageNotFoundError(context=str(image_name))
+        logger.error("Docker image - %s not found!", full_image_target)
+        raise DockerImageNotFoundError(context=str(full_image_target))
     logger.info("Required Image Exists!")
 
     logger.info("Checking if Container Exists!")
@@ -142,18 +176,48 @@ def docker_run(app_model: AppModel, app_dir: Path):
     except Exception as e:
         logger.error(e)
         raise DockerContainerRemovalError(context=str(e))
-    #verification phase completed
+    # verification phase completed
 
+    # --- Constructing the command using the Builder ---
+    logger.info("Constructing Docker run command.")
+    builder = DockerCommandBuilder()
+
+    run_cmd = (
+        builder.run()
+        .detached(is_detached=True)
+        .with_name(container_name)
+        .with_port_mapping(app_model.internal_port, app_model.container_port)
+        .with_restart_policy(kwargs.get("restart_policy", "unless-stopped"))
+        .with_resource_limits(
+            memory=kwargs.get("memory", '512m'),
+            cpus=kwargs.get("cpus", '1.0')
+        )
+        .with_log_config(
+            max_size=kwargs.get("log_max_size", "10m"),
+            max_file=kwargs.get("log_max_file", "3")
+        )
+    )
+
+    # Injecting environment variables dynamically if provided
+    if kwargs.get('env_vars'):
+        for key, value in kwargs['env_vars'].items():
+            run_cmd = run_cmd.with_env(key, value)
+
+    # The image MUST be the last configuration before compile()
+    run_cmd = run_cmd.with_image(full_image_target)
+    # --------------------------------------------------
 
     # Initiating docker Container Running command
-    logger.info("Initiating Docker run from image.")
+    logger.info("Initiating Docker run from image: %s", full_image_target)
     result = subprocess.run(
-        ["docker", "run", "-d", "--name", container_name, "-p", f"{app_model.internal_port}:{app_model.container_port}", f"{image_name}:latest"],
+        args=run_cmd.compile(),
         cwd=app_dir,
         capture_output=True,
         text=True
     )
+
     if result.returncode != 0:
         logger.error("Container Failed to Run with error %s", result.stderr)
         raise DockerRunError(context=f"{result.stderr}")
+
     logger.info("Successfully Initiated docker container with container id: %s", result.stdout.rstrip())
