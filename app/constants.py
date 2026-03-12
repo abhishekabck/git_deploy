@@ -4,3 +4,11 @@ class AppStatus(enum.Enum):
     RUNNING = "running"
     ERROR = "error"
     PREPARED = "prepared"
+
+class BillingType(enum.Enum):
+    FREE = "free"
+    PAID = "paid"
+
+class UserRoles(enum.Enum):
+    USER = "user"
+    ADMIN = "admin"
