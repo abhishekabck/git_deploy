@@ -65,7 +65,7 @@ def validate_github_repo(repo_url: str) -> None:
     logger.info("GitHub repository %s/%s validated successfully", owner, repo)
 
 
-def clone_or_pull_repo(repo_url: str, app_dir: Path) -> None:
+def clone_or_pull_repo(repo_url: str, app_dir: Path, **kwargs) -> None:
     git_dir = app_dir / ".git"
 
     logger.debug("Checking for existing git repository in %s", app_dir)
@@ -93,7 +93,13 @@ def clone_or_pull_repo(repo_url: str, app_dir: Path) -> None:
         if result.returncode != 0:
             logger.error("Git Pull failed with exit code %s. Error: %s", result.returncode, result.stderr)
             raise GitPullError(detail=result.stderr.strip(), context=repo_url)
-    
+
+    if kwargs.get("env"):
+        env_vars = kwargs["env"]
+        with open(app_dir / ".env", "w") as env_file:
+            for key, value in env_vars.items():
+                env_file.write(f"{key}={value}\n")
+        logger.info("Env variable written in .env file.")
     logger.info("Git operation finished successfully for %s", repo_url)
 
 

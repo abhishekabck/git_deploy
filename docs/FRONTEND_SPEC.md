@@ -1,7 +1,9 @@
-# gitDeploy — Frontend UI Specification
+# gitDeploy — Frontend Specification
 
-> **For the UI developer.** This document is the single source of truth for building the React frontend.
+> **For the UI developer.**
+> Everything in this document is derived directly from the actual backend code — schemas, validators, response shapes, cookie behaviour.
 > Design reference: [Vercel Dashboard](https://vercel.com/dashboard)
+> Last updated: 2026-03-12
 
 ---
 
@@ -9,144 +11,118 @@
 
 1. [Project Overview](#1-project-overview)
 2. [Tech Stack](#2-tech-stack)
-3. [Project Folder Structure](#3-project-folder-structure)
-4. [Design System & Tokens](#4-design-system--tokens)
-5. [Pages & Routes](#5-pages--routes)
-   - [Auth Pages](#auth-pages)
-   - [Dashboard](#dashboard)
-   - [Apps](#apps)
-   - [Deploy](#deploy)
-   - [Settings](#settings)
-6. [Forms — Complete Field Reference](#6-forms--complete-field-reference)
-7. [API Integration](#7-api-integration)
-8. [Auth Flow (Frontend)](#8-auth-flow-frontend)
-9. [Docker Setup](#9-docker-setup)
-10. [Nginx Configuration](#10-nginx-configuration)
-11. [Environment Variables](#11-environment-variables)
+3. [Folder Structure](#3-folder-structure)
+4. [Environment Variables](#4-environment-variables)
+5. [API Reference — Exact Contracts](#5-api-reference--exact-contracts)
+6. [Auth Flow (in full detail)](#6-auth-flow-in-full-detail)
+7. [Axios Setup](#7-axios-setup)
+8. [Pages & Routes](#8-pages--routes)
+9. [Forms — Every Field, Label, Validation](#9-forms--every-field-label-validation)
+10. [UI States to Handle](#10-ui-states-to-handle)
+11. [Design Tokens](#11-design-tokens)
+12. [Docker Setup](#12-docker-setup)
 
 ---
 
 ## 1. Project Overview
 
-**gitDeploy** is a self-hosted deployment platform that lets users deploy any public GitHub repository as a Docker container with automatic port allocation and subdomain routing — similar to Vercel but self-hosted.
+**gitDeploy** is a self-hosted platform where users deploy any public GitHub repository as a Docker container with an auto-assigned subdomain — like a self-hosted Vercel.
 
 ```
-User creates an App
-    └── Provides GitHub repo URL + config
-App is Deployed
-    └── Backend: clones repo → builds Docker image → runs container
-App goes Live
-    └── Accessible at: app-{id}.yourdomain.com
+User links a GitHub repo
+    └── Provide: repo URL, port, branch, Dockerfile path
+App is deployed
+    └── Backend: clones repo → docker build → docker run → assigns port
+App goes live
+    └── Accessible at: app-{id}.yourdomain.com  (via Traefik)
 ```
 
-**Core user actions:**
-- Register / Login
+**User can:**
+- Register / Login / Logout
 - Create an app (link a GitHub repo)
-- Deploy / Redeploy an app (with optional config overrides)
-- Monitor app status (running / error / created)
+- Deploy / Redeploy an app (with config overrides per deploy)
+- View app status, details, env vars
 - Delete an app
 
 ---
 
 ## 2. Tech Stack
 
-| Layer            | Technology                                                                  |
-|------------------|-----------------------------------------------------------------------------|
-| Framework        | React 18 + Vite                                                             |
-| Language         | TypeScript                                                                  |
-| Routing          | React Router v6                                                             |
-| State Management | Zustand (lightweight, no boilerplate)                                       |
-| Server State     | TanStack Query (React Query v5) — API calls, caching, loading states        |
-| Forms            | React Hook Form + Zod (validation)                                          |
-| Styling          | Tailwind CSS v3 + shadcn/ui (component primitives)                          |
-| Icons            | Lucide React                                                                |
-| HTTP Client      | Axios (with interceptors for auth)                                          |
-| Notifications    | sonner (toast library)                                                      |
-| Code Editor      | Monaco Editor (for env var editing)                                         |
-| Linting          | ESLint + Prettier                                                           |
-
-### Install Commands
-
-```bash
-npm create vite@latest gitdeploy-ui -- --template react-ts
-cd gitdeploy-ui
-
-npm install react-router-dom @tanstack/react-query zustand
-npm install react-hook-form @hookform/resolvers zod
-npm install axios sonner lucide-react
-npm install @monaco-editor/react
-
-# shadcn/ui setup
-npx shadcn-ui@latest init
-
-# Tailwind
-npm install -D tailwindcss postcss autoprefixer
-npx tailwindcss init -p
-```
+| Layer | Choice | Notes |
+|---|---|---|
+| Framework | React 18 + Vite | Fast dev server, ESM build |
+| Language | TypeScript | Strict mode on |
+| Routing | React Router v6 | Nested routes |
+| HTTP | Axios | With interceptor for auto-refresh |
+| State | Zustand | Auth store + app store |
+| Styling | Tailwind CSS v3 | Dark-first, like Vercel |
+| Forms | React Hook Form | + Zod for schema validation |
+| Icons | Lucide React | Consistent icon set |
+| Notifications | react-hot-toast | Minimal toasts |
 
 ---
 
-## 3. Project Folder Structure
+## 3. Folder Structure
 
 ```
-gitdeploy-ui/
+frontend/
 ├── public/
-│   └── favicon.ico
+│   └── favicon.svg
 ├── src/
-│   ├── api/                    # Axios instances + API call functions
-│   │   ├── client.ts           # Axios config, interceptors, token refresh
-│   │   ├── auth.ts             # login, register, logout, refresh
-│   │   └── apps.ts             # createApp, listApps, getApp, deployApp, deleteApp
+│   ├── api/
+│   │   ├── axiosInstance.ts      ← Axios config + interceptors (DO NOT skip)
+│   │   ├── auth.api.ts           ← login / register / refresh / logout / me
+│   │   └── apps.api.ts           ← create / list / get / deploy / delete
 │   │
-│   ├── components/             # Reusable UI components
-│   │   ├── layout/
-│   │   │   ├── Sidebar.tsx
-│   │   │   ├── Topbar.tsx
-│   │   │   └── AppShell.tsx    # Sidebar + Topbar wrapper
-│   │   ├── ui/                 # shadcn/ui primitives (auto-generated)
-│   │   ├── AppCard.tsx
-│   │   ├── StatusBadge.tsx
-│   │   ├── DeployButton.tsx
-│   │   └── EmptyState.tsx
+│   ├── store/
+│   │   ├── auth.store.ts         ← accessToken (memory), user object
+│   │   └── apps.store.ts         ← apps list cache
 │   │
-│   ├── pages/                  # One file per route
-│   │   ├── auth/
-│   │   │   ├── LoginPage.tsx
-│   │   │   └── RegisterPage.tsx
+│   ├── pages/
+│   │   ├── LoginPage.tsx
+│   │   ├── SignupPage.tsx
 │   │   ├── DashboardPage.tsx
-│   │   ├── AppsListPage.tsx
-│   │   ├── AppDetailPage.tsx
 │   │   ├── NewAppPage.tsx
-│   │   ├── DeployPage.tsx
-│   │   └── SettingsPage.tsx
+│   │   ├── AppDetailPage.tsx
+│   │   └── NotFoundPage.tsx
 │   │
-│   ├── hooks/                  # Custom React hooks
-│   │   ├── useAuth.ts
-│   │   ├── useApps.ts
-│   │   └── useDeployment.ts
+│   ├── components/
+│   │   ├── layout/
+│   │   │   ├── AppShell.tsx      ← sidebar + topbar wrapper
+│   │   │   ├── Sidebar.tsx
+│   │   │   └── TopBar.tsx
+│   │   ├── apps/
+│   │   │   ├── AppCard.tsx       ← used on dashboard grid
+│   │   │   ├── AppStatusBadge.tsx
+│   │   │   └── EnvVarEditor.tsx  ← key/value pair editor
+│   │   └── ui/
+│   │       ├── Button.tsx
+│   │       ├── Input.tsx
+│   │       ├── Label.tsx
+│   │       ├── Card.tsx
+│   │       └── Spinner.tsx
 │   │
-│   ├── store/                  # Zustand stores
-│   │   └── authStore.ts        # user, accessToken, setToken, clear
-│   │
-│   ├── types/                  # TypeScript interfaces
-│   │   ├── app.ts
-│   │   └── auth.ts
-│   │
-│   ├── lib/
-│   │   └── utils.ts            # cn() helper, formatDate, etc.
+│   ├── hooks/
+│   │   ├── useAuth.ts            ← login/logout/register helpers
+│   │   └── useApps.ts            ← CRUD helpers wrapping api calls
 │   │
 │   ├── router/
-│   │   └── index.tsx           # All routes + ProtectedRoute wrapper
+│   │   ├── index.tsx             ← Route definitions
+│   │   └── ProtectedRoute.tsx    ← Redirects to /login if not authed
+│   │
+│   ├── types/
+│   │   ├── auth.types.ts
+│   │   └── app.types.ts
 │   │
 │   ├── App.tsx
-│   └── main.tsx
+│   ├── main.tsx
+│   └── index.css
 │
-├── Dockerfile
-├── nginx.conf                  # Nginx config for serving React build
-├── docker-compose.yml
 ├── .env.example
-├── .env.development
-├── .env.production
+├── .env.local                    ← gitignored
+├── Dockerfile.frontend
+├── nginx.conf                    ← SPA fallback config (inside container)
+├── index.html
 ├── vite.config.ts
 ├── tailwind.config.ts
 └── tsconfig.json
@@ -154,594 +130,353 @@ gitdeploy-ui/
 
 ---
 
-## 4. Design System & Tokens
+## 4. Environment Variables
 
-Reference design: Vercel dashboard — dark-first, minimal, monospace for code values.
+```bash
+# .env.example
+VITE_API_BASE_URL=http://localhost:8000
+# In production: https://api.yourdomain.com
+```
 
-### Color Palette (Tailwind config)
+> Only `VITE_` prefixed vars are exposed to the browser by Vite.
 
+---
+
+## 5. API Reference — Exact Contracts
+
+All endpoints are prefixed with `/api/v1`.
+All authenticated endpoints require: `Authorization: Bearer <access_token>`
+
+---
+
+### Auth Endpoints
+
+#### `POST /api/v1/auth/register`
+
+**Request body:**
 ```ts
-// tailwind.config.ts
-export default {
-  darkMode: "class",
-  theme: {
-    extend: {
-      colors: {
-        background:  "#0a0a0a",   // Page background
-        surface:     "#111111",   // Card / sidebar background
-        border:      "#1f1f1f",   // Dividers, input borders
-        muted:       "#888888",   // Placeholder, secondary text
-        foreground:  "#ededed",   // Primary text
-        primary:     "#ffffff",   // Buttons, active states
-        accent:      "#0070f3",   // Links, focus rings (Vercel blue)
-        success:     "#50e3c2",   // Running status
-        warning:     "#f5a623",   // Prepared status
-        error:       "#ff4444",   // Error status
-        created:     "#888888",   // Created (not deployed) status
-      },
-      fontFamily: {
-        sans: ["Geist Sans", "Inter", "system-ui", "sans-serif"],
-        mono: ["Geist Mono", "JetBrains Mono", "monospace"],
-      },
-    },
-  },
+{
+  username: string   // min 3, max 50 chars, only letters/numbers/underscores
+  email: string      // valid email, stored lowercase
+  password: string   // min 8 chars
 }
 ```
 
-### Status Badge Colors
-
-| Status      | Color      | Label       |
-|-------------|------------|-------------|
-| `created`   | gray       | Created     |
-| `running`   | teal/green | Running     |
-| `error`     | red        | Error       |
-| `prepared`  | yellow     | Prepared    |
-
-### Typography Scale
-
+**201 Response:**
+```ts
+{
+  id: number
+  username: string
+  email: string
+  role: "user" | "admin"
+  billing_type: "free" | "paid"
+}
 ```
-Page title:     text-2xl font-semibold
-Section header: text-sm font-medium text-muted uppercase tracking-wider
-Body:           text-sm text-foreground
-Muted:          text-sm text-muted
-Code/URL:       font-mono text-xs
-Label (form):   text-sm font-medium
-```
+
+**Error cases:**
+| Status | When |
+|--------|------|
+| 409 | `"Email already registered"` or `"Username already registered"` |
+| 422 | Validation failed (email format, username chars, password length) |
 
 ---
 
-## 5. Pages & Routes
+#### `POST /api/v1/auth/login`
 
-```
-/login                → LoginPage        (public)
-/register             → RegisterPage     (public)
-/                     → DashboardPage    (protected)
-/apps                 → AppsListPage     (protected)
-/apps/new             → NewAppPage       (protected)
-/apps/:id             → AppDetailPage    (protected)
-/apps/:id/deploy      → DeployPage       (protected)
-/settings             → SettingsPage     (protected)
+**Request body:**
+```ts
+{
+  email: string
+  password: string
+}
 ```
 
-### Protected Route Wrapper
+**200 Response (body):**
+```ts
+{
+  access_token: string   // JWT, valid 15 minutes
+  token_type: "bearer"
+}
+```
 
-```tsx
-// router/index.tsx
-function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const { accessToken } = useAuthStore();
-  if (!accessToken) return <Navigate to="/login" replace />;
-  return <>{children}</>;
+**200 Response (cookie):**
+```
+Set-Cookie: refresh_token=<jwt>;
+            HttpOnly; SameSite=Lax;
+            Path=/api/v1/auth/refresh;   ← IMPORTANT: scoped to refresh path only
+            Max-Age=604800               ← 7 days
+```
+
+> ⚠️ The refresh cookie is **path-scoped to `/api/v1/auth/refresh`**. The browser will only send it on requests to that exact path. Axios `withCredentials: true` must be set.
+
+**Error cases:**
+| Status | When |
+|--------|------|
+| 401 | Wrong email or password |
+
+---
+
+#### `POST /api/v1/auth/refresh`
+
+No request body. The browser sends the `refresh_token` cookie automatically.
+
+**200 Response:**
+```ts
+{
+  access_token: string   // New JWT, valid 15 minutes
+  token_type: "bearer"
+}
+```
+
+**Error cases:**
+| Status | When |
+|--------|------|
+| 401 | Cookie missing, token expired, token invalid, user not found |
+
+---
+
+#### `POST /api/v1/auth/logout`
+
+No request body.
+
+**200 Response:**
+```ts
+{ message: "Logged out successfully" }
+```
+> Backend deletes the `refresh_token` cookie. Frontend should also clear the in-memory access token.
+
+---
+
+#### `GET /api/v1/auth/me`  🔒 Requires auth
+
+**200 Response:**
+```ts
+{
+  id: number
+  username: string
+  email: string
+  role: "user" | "admin"
+  billing_type: "free" | "paid"
 }
 ```
 
 ---
 
-### Auth Pages
+### Apps Endpoints
+
+#### `POST /api/v1/apps/create`  🔒 Requires auth
+
+**Request body:**
+```ts
+{
+  name: string          // min 3, max 255 chars
+  repo_url: string      // must be a valid public GitHub URL
+  container_port: number // port your app listens on inside the container
+  branch?: string       // default: "main"
+  source_dir?: string   // default: "."
+  dockerfile_path?: string  // default: "Dockerfile"
+  env?: Record<string, string>  // default: {}
+}
+```
+
+**201 Response:**
+```ts
+{
+  id: number
+  subdomain: string     // "app-{id}" — e.g. "app-42"
+  container_port: number
+  status: "created"     // always "created" on first create
+}
+```
+
+**Error cases:**
+| Status | When |
+|--------|------|
+| 400 | Invalid GitHub URL format |
+| 404 | GitHub repo not found or is private |
+| 422 | Validation error (name too short, missing required fields) |
 
 ---
 
-#### `/login` — Login Page
+#### `GET /api/v1/apps/list/`  🔒 Requires auth
 
-**Purpose:** Authenticate existing user, receive access + refresh tokens.
-
-**Layout:** Centered card (max-w-sm), logo top, form, link to register.
-
+**Query params:**
 ```
-┌─────────────────────────────────┐
-│          gitDeploy              │  ← logo / wordmark
-│                                 │
-│  Sign in to your account        │  ← heading
-│                                 │
-│  Email                          │
-│  [________________________]     │
-│                                 │
-│  Password                       │
-│  [________________________] 👁  │
-│                                 │
-│  [       Sign In        ]       │  ← primary button, full width
-│                                 │
-│  Don't have an account? Register│
-└─────────────────────────────────┘
+?status=running    optional — one of: created | running | error | prepared
+&page=1            optional — default 1
+&size=20           optional — default 20
 ```
 
-**Behavior:**
-- On success → redirect to `/`
-- Show inline error on wrong credentials: `"Invalid email or password"`
-- Show spinner on button while submitting
-
----
-
-#### `/register` — Register Page
-
-**Purpose:** Create a new account.
-
-**Layout:** Same as login page.
-
-```
-┌─────────────────────────────────┐
-│          gitDeploy              │
-│                                 │
-│  Create your account            │
-│                                 │
-│  Username                       │
-│  [________________________]     │
-│                                 │
-│  Email                          │
-│  [________________________]     │
-│                                 │
-│  Password                       │
-│  [________________________] 👁  │
-│                                 │
-│  Confirm Password               │
-│  [________________________] 👁  │
-│                                 │
-│  [       Create Account  ]      │
-│                                 │
-│  Already have an account? Login │
-└─────────────────────────────────┘
-```
-
-**Behavior:**
-- On success → redirect to `/login` with success toast: `"Account created. Please sign in."`
-
----
-
-### Dashboard
-
----
-
-#### `/` — Dashboard Page
-
-**Purpose:** Overview of user's deployments at a glance.
-
-**Layout:** App shell (sidebar + topbar) + main content area.
-
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│  SIDEBAR          │  TOPBAR: "Dashboard"                  [New App +]   │
-│                   │──────────────────────────────────────────────────────│
-│  ◉ Dashboard      │                                                      │
-│  ☰ Apps           │  ┌─────────┐  ┌─────────┐  ┌─────────┐             │
-│  ⚙ Settings       │  │ Total   │  │ Running │  │ Errors  │             │
-│                   │  │  Apps   │  │         │  │         │             │
-│  ──────────────── │  │   12    │  │    9    │  │    2    │             │
-│                   │  └─────────┘  └─────────┘  └─────────┘             │
-│  [User Avatar]    │                                                      │
-│  alice            │  Recent Deployments                                  │
-│  Free plan        │  ┌──────────────────────────────────────────────┐   │
-│                   │  │ my-api          running    app-1.domain.com  │   │
-│                   │  │ frontend-app    error      app-2.domain.com  │   │
-│                   │  │ backend-svc     created    app-3.domain.com  │   │
-│                   │  └──────────────────────────────────────────────┘   │
-└──────────────────────────────────────────────────────────────────────────┘
-```
-
-**Stats cards:** Total Apps, Running, Error count. Fetch from `/api/v1/apps/list/`.
-
----
-
-### Apps
-
----
-
-#### `/apps` — Apps List Page
-
-**Purpose:** Show all user's apps with status, quick actions.
-
-**Layout:** Page header + filter bar + app grid/list.
-
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│  Apps                                              [+ New App]           │
-│                                                                          │
-│  Filter: [All ▼]  Search: [________________]                            │
-│                                                                          │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │  my-api                                          ● running      │    │
-│  │  github.com/alice/my-api  ·  main  ·  app-1.domain.com         │    │
-│  │  Updated 2 hours ago            [Visit] [Redeploy] [⋯]         │    │
-│  ├─────────────────────────────────────────────────────────────────┤    │
-│  │  frontend-app                                    ● error        │    │
-│  │  github.com/alice/frontend  ·  develop  ·  app-2.domain.com    │    │
-│  │  Updated 5 hours ago            [Visit] [Redeploy] [⋯]         │    │
-│  ├─────────────────────────────────────────────────────────────────┤    │
-│  │  worker-service                                  ○ created      │    │
-│  │  github.com/alice/worker  ·  main  ·  Not deployed yet         │    │
-│  │  Updated 1 day ago                     [Deploy] [⋯]            │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-│                                                                          │
-│  Showing 3 of 3 apps                                                     │
-└──────────────────────────────────────────────────────────────────────────┘
-```
-
-**Behaviors:**
-- Filter dropdown: `All | Running | Error | Created | Prepared`
-- Search: client-side filter by app name or repo URL
-- `[Visit]` → opens `http://app-{id}.yourdomain.com` in new tab
-- `[Redeploy]` → navigates to `/apps/:id/deploy`
-- `[⋯]` menu → `View Details`, `Redeploy`, `Delete`
-- `Delete` → confirmation dialog before calling DELETE API
-
----
-
-#### `/apps/new` — New App Page
-
-**Purpose:** Create a new app record (does NOT deploy yet).
-
-**Layout:** Single-column form card, max-w-2xl centered.
-
-```
-┌──────────────────────────────────────────────┐
-│  ← Back to Apps                              │
-│                                              │
-│  Create New App                              │
-│  Link a GitHub repository to deploy         │
-│                                              │
-│  ──────── Basic Info ────────               │
-│                                              │
-│  App Name *                                  │
-│  [________________________________]          │
-│  Hint: A display name for your app           │
-│                                              │
-│  GitHub Repository URL *                     │
-│  [________________________________]          │
-│  Hint: Must be a public GitHub repo          │
-│  e.g. https://github.com/user/repo.git       │
-│                                              │
-│  Branch                                      │
-│  [main___________________________]           │
-│  Hint: Branch to deploy from                 │
-│                                              │
-│  ──────── Container Config ────────          │
-│                                              │
-│  Container Port *                            │
-│  [8000____________________________]          │
-│  Hint: Port your app listens on inside       │
-│  the container (e.g. 8000 for FastAPI,       │
-│  3000 for Node.js, 80 for nginx)             │
-│                                              │
-│  Source Directory                            │
-│  [._______________________________]          │
-│  Hint: Path within the repo to build from   │
-│  (use "." for repo root)                     │
-│                                              │
-│  Dockerfile Path                             │
-│  [Dockerfile____________________]            │
-│  Hint: Relative path to your Dockerfile      │
-│                                              │
-│  ──────── Environment Variables ────────     │
-│                                              │
-│  Environment Variables                       │
-│  ┌──────────────┐  ┌──────────────┐  [✕]    │
-│  │ KEY          │  │ VALUE        │          │
-│  └──────────────┘  └──────────────┘          │
-│  [+ Add Variable]                            │
-│                                              │
-│  [Cancel]          [Create App →]            │
-└──────────────────────────────────────────────┘
-```
-
-**On Success:**
-- Toast: `"App created successfully"`
-- Redirect to `/apps/:id` (app detail page)
-- Show a banner on detail page: `"App created. Ready to deploy."`
-
----
-
-#### `/apps/:id` — App Detail Page
-
-**Purpose:** Full view of a single app — status, config, links, actions.
-
-**Layout:** Two-column on desktop: left = main info, right = metadata sidebar.
-
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│  ← Apps   /   my-api                                                     │
-│                                                                          │
-│  my-api                                  ● running                       │
-│  github.com/alice/my-api                                                 │
-│                                                                          │
-│  [Deploy / Redeploy]   [Visit App ↗]   [⋯ More]                         │
-│                                                                          │
-│  ─────────────────────────────────────────────────────────────────────  │
-│                                                                          │
-│  LIVE URL                                                                │
-│  http://app-1.yourdomain.com                        [Copy]              │
-│                                                                          │
-│  ──────── Deployment Info ────────                                       │
-│                                                                          │
-│  │ Branch         │ main                          │                      │
-│  │ Repo URL       │ https://github.com/alice/...  │                      │
-│  │ Dockerfile     │ Dockerfile                    │                      │
-│  │ Source Dir     │ .                             │                      │
-│  │ Container Port │ 8000                          │                      │
-│  │ Internal Port  │ 10023                         │                      │
-│  │ Status         │ ● running                     │                      │
-│  │ Subdomain      │ app-1                         │                      │
-│  │ Created At     │ March 10, 2026 14:32          │                      │
-│  │ Last Updated   │ March 12, 2026 09:15          │                      │
-│                                                                          │
-│  ──────── Environment Variables ────────                                 │
-│                                                                          │
-│  │ NODE_ENV       │ production                    │                      │
-│  │ PORT           │ 8000                          │                      │
-│  (shown as masked ••••••• with toggle to reveal)                         │
-│                                                                          │
-│  ──────── Danger Zone ────────                                           │
-│                                                                          │
-│  Delete this app                                                         │
-│  This will stop and remove the container, image, and all app data.      │
-│  [Delete App]  ← red destructive button                                  │
-└──────────────────────────────────────────────────────────────────────────┘
-```
-
-**Delete flow:**
-```
-Click "Delete App"
-    └── Confirmation Dialog:
-        "Are you sure you want to delete my-api?
-         This action cannot be undone."
-        [Cancel]  [Delete App]
-        ↓ on confirm → DELETE /api/v1/apps/delete/:id
-        ↓ success → redirect to /apps + toast "App deleted"
+**200 Response:**
+```ts
+Array<{
+  id: number
+  name: string
+  subdomain: string     // "app-{id}"
+  container_port: number
+  repo_url: string
+  build_path: string    // source_dir value
+  branch: string
+  status: "created" | "running" | "error" | "prepared"
+}>
 ```
 
 ---
 
-### Deploy
+#### `GET /api/v1/apps/{app_id}`  🔒 Requires auth
+
+**200 Response:**
+```ts
+{
+  id: number
+  name: string
+  repo_url: string
+  subdomain: string
+  internal_port: number | null   // null until first deploy
+  container_port: number
+  branch: string
+  build_path: string
+  dockerfile_path: string
+  status: "created" | "running" | "error" | "prepared"
+  created_at: string             // ISO 8601 datetime
+  updated_at: string             // ISO 8601 datetime
+  env: Record<string, string>
+}
+```
+
+**Error cases:**
+| Status | When |
+|--------|------|
+| 403 | App belongs to another user |
+| 404 | App not found |
 
 ---
 
-#### `/apps/:id/deploy` — Deploy Page
+#### `DELETE /api/v1/apps/delete/{app_id}`  🔒 Requires auth
 
-**Purpose:** Trigger a deployment with optional config overrides.
+**204 Response** — No body.
 
-**Layout:** Single-column form card, max-w-2xl. Pre-fill from existing app config.
-
-```
-┌──────────────────────────────────────────────┐
-│  ← my-api                                    │
-│                                              │
-│  Deploy my-api                               │
-│  Configure and trigger a new deployment      │
-│                                              │
-│  ──────── Git Config ────────               │
-│                                              │
-│  Branch                                      │
-│  [main___________________________]           │
-│  Hint: Override branch for this deployment   │
-│                                              │
-│  Source Directory                            │
-│  [._______________________________]          │
-│                                              │
-│  Dockerfile Path                             │
-│  [Dockerfile____________________]            │
-│                                              │
-│  ──────── Build Options ────────             │
-│                                              │
-│  Build Arguments                             │
-│  ┌──────────────┐  ┌──────────────┐  [✕]    │
-│  │ ARG KEY      │  │ VALUE        │          │
-│  └──────────────┘  └──────────────┘          │
-│  [+ Add Build Arg]                           │
-│                                              │
-│  ┌────────────────────────────────────┐      │
-│  │ ☐  Force Rebuild                   │      │
-│  │    Ignore existing Docker image    │      │
-│  └────────────────────────────────────┘      │
-│                                              │
-│  ┌────────────────────────────────────┐      │
-│  │ ☐  Clear Cache                     │      │
-│  │    Build without Docker cache      │      │
-│  └────────────────────────────────────┘      │
-│                                              │
-│  ──────── Environment Variables ────────     │
-│                                              │
-│  (Pre-filled from app config)                │
-│  ┌──────────────┐  ┌──────────────┐  [✕]    │
-│  │ NODE_ENV     │  │ production   │          │
-│  └──────────────┘  └──────────────┘          │
-│  [+ Add Variable]                            │
-│                                              │
-│  ──────── Deploy ────────                    │
-│                                              │
-│  ⚠ This will stop the current container     │
-│    and start a new one.                      │
-│                                              │
-│  [Cancel]      [🚀 Deploy Now]               │
-└──────────────────────────────────────────────┘
-```
-
-**Deploy in-progress state:**
-
-```
-┌──────────────────────────────────────────────┐
-│                                              │
-│  Deploying my-api...                         │
-│                                              │
-│  ▸ Validating repository    ✓               │
-│  ▸ Cloning / pulling code   ✓               │
-│  ▸ Building Docker image    ⏳ (in progress) │
-│  ▸ Allocating port          ○               │
-│  ▸ Starting container       ○               │
-│                                              │
-│  (Note: backend processes are sync —         │
-│   poll GET /apps/:id for status change)      │
-│                                              │
-│  [Cancel deployment]                         │
-└──────────────────────────────────────────────┘
-```
-
-> **Backend note:** The deploy endpoint is synchronous. Poll `GET /api/v1/apps/:id` every 3 seconds until status changes from what it was. Show animated progress steps while polling.
-
-**On success:** Redirect to `/apps/:id` + toast `"Deployed successfully"`
-**On error:** Show error message from API response + `error_code` + `message`.
+> Removes container, image, cloned repo files, log files, and DB record.
 
 ---
 
-### Settings
+#### `POST /api/v1/apps/{app_id}/deploy`  🔒 Requires auth
+
+All fields are optional. Provided values override what was saved at create time for this deploy only.
+
+**Request body:**
+```ts
+{
+  branch?: string            // override branch for this deploy
+  source_dir?: string        // override source directory
+  dockerfile_path?: string   // override Dockerfile location
+  env?: Record<string, string>  // override env vars
+  force_rebuild?: boolean    // delete cloned repo and clone fresh (default false)
+  build_args?: Record<string, string>  // Docker build-time ARGs
+  clear_cache?: boolean      // pass --no-cache to docker build (default false)
+}
+```
+
+**201 Response:**
+```ts
+{
+  id: number
+  status: "running" | "error"
+}
+```
+
+**Error cases:**
+| Status | When |
+|--------|------|
+| 403 | App belongs to another user |
+| 404 | App not found |
+| 500 | Docker build failed, Docker run failed |
+
+> ⚠️ Deploy is **synchronous** — the request takes time (git clone + docker build). Show a loading state. Do not timeout early.
 
 ---
 
-#### `/settings` — Settings Page
+## 6. Auth Flow (in full detail)
 
-**Purpose:** Manage account details, API access, danger zone.
-
-**Layout:** Tabs or sections on a single page.
+### On App Load
 
 ```
-┌──────────────────────────────────────────────┐
-│  Settings                                    │
-│                                              │
-│  ──────── Profile ────────                   │
-│                                              │
-│  Username                                    │
-│  [alice____________________________]         │
-│                                              │
-│  Email                                       │
-│  [alice@example.com_______________]          │
-│                                              │
-│  [Save Changes]                              │
-│                                              │
-│  ──────── Change Password ────────           │
-│                                              │
-│  Current Password                            │
-│  [________________________] 👁              │
-│                                              │
-│  New Password                                │
-│  [________________________] 👁              │
-│                                              │
-│  Confirm New Password                        │
-│  [________________________] 👁              │
-│                                              │
-│  [Update Password]                           │
-│                                              │
-│  ──────── API Access ────────                │
-│                                              │
-│  Your API Key                                │
-│  [sk_live_••••••••••••]  [Copy] [Reveal]    │
-│                                              │
-│  [Regenerate Key] ← confirms before regen   │
-│                                              │
-│  ──────── Plan ────────                      │
-│                                              │
-│  Current Plan:  Free                         │
-│  Upgrade for more apps and resources         │
-│                                              │
-│  ──────── Danger Zone ────────               │
-│                                              │
-│  Delete Account                              │
-│  This will delete all your apps and data.   │
-│  [Delete My Account] ← destructive          │
-└──────────────────────────────────────────────┘
+App starts
+    │
+    ├── accessToken in memory? ─── Yes ──► load normally
+    │
+    └── No
+         │
+         └── POST /api/v1/auth/refresh
+              │
+              ├── 200 ──► store new accessToken → load normally
+              │
+              └── 401 ──► redirect to /login
+```
+
+### Login Flow
+
+```
+User submits /login form
+    │
+    └── POST /api/v1/auth/login { email, password }
+         │
+         ├── 200 ──► store access_token in memory (Zustand, NOT localStorage)
+         │           cookie is set automatically by browser
+         │           GET /api/v1/auth/me → store user in Zustand
+         │           redirect to /dashboard
+         │
+         └── 401 ──► show "Invalid email or password" under form
+```
+
+### Every API call
+
+```
+Axios request interceptor
+    └── reads accessToken from Zustand store
+        └── sets Authorization: Bearer <token>
+```
+
+### Token expires mid-session (auto-refresh)
+
+```
+Any API call returns 401
+    │
+    └── Axios response interceptor
+         │
+         └── POST /api/v1/auth/refresh  (cookie sent automatically)
+              │
+              ├── 200 ──► update accessToken in store
+              │           retry original request with new token
+              │
+              └── 401 ──► clear store → redirect to /login
+```
+
+### Logout
+
+```
+User clicks logout
+    │
+    └── POST /api/v1/auth/logout
+         └── clear accessToken and user from Zustand store
+             redirect to /login
 ```
 
 ---
 
-## 6. Forms — Complete Field Reference
-
-### Form: Create App (`POST /api/v1/apps/create`)
-
-| Field                  | Label                    | Type       | Required | Default      | Validation                                              |
-|------------------------|--------------------------|------------|----------|--------------|---------------------------------------------------------|
-| `name`                 | App Name                 | text       | Yes      | —            | 3–255 chars, alphanumeric + hyphens                     |
-| `repo_url`             | GitHub Repository URL    | text (url) | Yes      | —            | Must start with `https://github.com/`, end with `.git` |
-| `branch`               | Branch                   | text       | No       | `main`       | Non-empty string                                        |
-| `container_port`       | Container Port           | number     | Yes      | `8000`       | Integer 1–65535                                         |
-| `source_dir`           | Source Directory         | text       | No       | `.`          | Non-empty string                                        |
-| `dockerfile_path`      | Dockerfile Path          | text       | No       | `Dockerfile` | Non-empty string                                        |
-| `env` (key-value rows) | Environment Variables    | key-value  | No       | `{}`         | Keys: UPPER_SNAKE_CASE recommended                      |
-
----
-
-### Form: Deploy App (`POST /api/v1/apps/:id/deploy`)
-
-| Field                  | Label                    | Type      | Required | Default         | Validation            |
-|------------------------|--------------------------|-----------|----------|-----------------|-----------------------|
-| `branch`               | Branch                   | text      | No       | App's branch    | Non-empty if provided |
-| `source_dir`           | Source Directory         | text      | No       | App's source    | Non-empty if provided |
-| `dockerfile_path`      | Dockerfile Path          | text      | No       | App's Dockerfile| Non-empty if provided |
-| `env` (key-value rows) | Environment Variables    | key-value | No       | App's env       | —                     |
-| `build_args`           | Build Arguments          | key-value | No       | `{}`            | Docker ARG format     |
-| `force_rebuild`        | Force Rebuild            | checkbox  | No       | `false`         | —                     |
-| `clear_cache`          | Clear Build Cache        | checkbox  | No       | `false`         | —                     |
-
----
-
-### Form: Login (`POST /api/v1/auth/login`)
-
-| Field      | Label    | Type     | Required | Validation                 |
-|------------|----------|----------|----------|----------------------------|
-| `email`    | Email    | email    | Yes      | Valid email format         |
-| `password` | Password | password | Yes      | Min 8 chars                |
-
----
-
-### Form: Register (`POST /api/v1/auth/register`)
-
-| Field              | Label            | Type     | Required | Validation                          |
-|--------------------|------------------|----------|----------|-------------------------------------|
-| `username`         | Username         | text     | Yes      | 3–50 chars, alphanumeric + _        |
-| `email`            | Email            | email    | Yes      | Valid email format                  |
-| `password`         | Password         | password | Yes      | Min 8 chars, 1 uppercase, 1 number  |
-| `confirm_password` | Confirm Password | password | Yes      | Must match `password`               |
-
----
-
-### Form: Update Profile (`PUT /api/v1/auth/me`)
-
-| Field      | Label    | Type  | Required | Validation          |
-|------------|----------|-------|----------|---------------------|
-| `username` | Username | text  | No       | 3–50 chars          |
-| `email`    | Email    | email | No       | Valid email format  |
-
----
-
-### Form: Change Password (`PUT /api/v1/auth/me/password`)
-
-| Field              | Label             | Type     | Required | Validation                |
-|--------------------|-------------------|----------|----------|---------------------------|
-| `current_password` | Current Password  | password | Yes      | Non-empty                 |
-| `new_password`     | New Password      | password | Yes      | Min 8 chars               |
-| `confirm_password` | Confirm New       | password | Yes      | Must match `new_password` |
-
----
-
-## 7. API Integration
-
-### Axios Client Setup
+## 7. Axios Setup
 
 ```ts
-// src/api/client.ts
-import axios from "axios";
-import { useAuthStore } from "@/store/authStore";
+// src/api/axiosInstance.ts
+import axios from 'axios';
+import { useAuthStore } from '../store/auth.store';
 
-const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL,   // e.g. http://localhost:8000
-  withCredentials: true,                    // send HttpOnly refresh token cookie
+export const api = axios.create({
+  baseURL: import.meta.env.VITE_API_BASE_URL,
+  withCredentials: true,   // sends refresh_token cookie on /api/v1/auth/refresh
 });
 
-// Attach access token to every request
+// ── Attach access token to every request ─────────────────────────────────────
 api.interceptors.request.use((config) => {
   const token = useAuthStore.getState().accessToken;
   if (token) {
@@ -750,491 +485,502 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-// Auto-refresh on 401
+// ── Auto-refresh on 401 ───────────────────────────────────────────────────────
+let isRefreshing = false;
+let queue: Array<(token: string) => void> = [];
+
 api.interceptors.response.use(
   (res) => res,
   async (error) => {
     const original = error.config;
+
+    // Don't retry the refresh call itself
+    if (original.url?.includes('/auth/refresh')) {
+      useAuthStore.getState().clearAuth();
+      window.location.href = '/login';
+      return Promise.reject(error);
+    }
+
     if (error.response?.status === 401 && !original._retry) {
       original._retry = true;
+
+      if (isRefreshing) {
+        // Queue requests that come in while refresh is in flight
+        return new Promise((resolve) => {
+          queue.push((token) => {
+            original.headers.Authorization = `Bearer ${token}`;
+            resolve(api(original));
+          });
+        });
+      }
+
+      isRefreshing = true;
+
       try {
-        const { data } = await axios.post(
-          `${import.meta.env.VITE_API_URL}/api/v1/auth/refresh`,
-          {},
-          { withCredentials: true }
-        );
-        useAuthStore.getState().setToken(data.access_token);
-        original.headers.Authorization = `Bearer ${data.access_token}`;
+        const { data } = await api.post('/api/v1/auth/refresh');
+        const newToken = data.access_token;
+        useAuthStore.getState().setAccessToken(newToken);
+        queue.forEach((cb) => cb(newToken));
+        queue = [];
+        original.headers.Authorization = `Bearer ${newToken}`;
         return api(original);
       } catch {
-        useAuthStore.getState().clear();
-        window.location.href = "/login";
+        useAuthStore.getState().clearAuth();
+        window.location.href = '/login';
+        return Promise.reject(error);
+      } finally {
+        isRefreshing = false;
       }
     }
+
     return Promise.reject(error);
   }
 );
-
-export default api;
 ```
 
-### API Functions
-
 ```ts
-// src/api/apps.ts
-import api from "./client";
+// src/store/auth.store.ts
+import { create } from 'zustand';
 
-export const appsApi = {
-  list: (params?: { status?: string; page?: number; size?: number }) =>
-    api.get("/api/v1/apps/list/", { params }),
-
-  get: (id: number) =>
-    api.get(`/api/v1/apps/${id}`),
-
-  create: (data: CreateAppPayload) =>
-    api.post("/api/v1/apps/create", data),
-
-  deploy: (id: number, data: DeployAppPayload) =>
-    api.post(`/api/v1/apps/${id}/deploy`, data),
-
-  delete: (id: number) =>
-    api.delete(`/api/v1/apps/delete/${id}`),
-};
-```
-
-### TypeScript Types
-
-```ts
-// src/types/app.ts
-export type AppStatus = "created" | "running" | "error" | "prepared";
-
-export interface AppListItem {
+interface User {
   id: number;
-  name: string;
-  subdomain: string;
-  container_port: number;
-  status: AppStatus;
-  build_path: string;
-  branch: string;
-  repo_url: string;
+  username: string;
+  email: string;
+  role: 'user' | 'admin';
+  billing_type: 'free' | 'paid';
 }
 
-export interface AppDetail extends AppListItem {
-  internal_port: number | null;
-  dockerfile_path: string;
-  created_at: string;
-  updated_at: string;
-  env: Record<string, string>;
-}
-
-export interface CreateAppPayload {
-  name: string;
-  repo_url: string;
-  container_port: number;
-  branch?: string;
-  source_dir?: string;
-  dockerfile_path?: string;
-  env?: Record<string, string>;
-}
-
-export interface DeployAppPayload {
-  branch?: string;
-  source_dir?: string;
-  dockerfile_path?: string;
-  env?: Record<string, string>;
-  build_args?: Record<string, string>;
-  force_rebuild?: boolean;
-  clear_cache?: boolean;
-}
-```
-
-### API Error Format (from backend)
-
-```ts
-// All errors from backend:
-{
-  "error_code": 1004,
-  "message": "Repository not found or is private",
-  "status_code": 404
-}
-
-// Handle in UI:
-export function getErrorMessage(error: unknown): string {
-  if (axios.isAxiosError(error)) {
-    return error.response?.data?.message ?? "Something went wrong";
-  }
-  return "Network error";
-}
-```
-
-### Common Error Codes to Handle in UI
-
-| Error Code | Meaning                             | UI Message                                     |
-|------------|-------------------------------------|------------------------------------------------|
-| 1000       | Invalid repo URL                    | `"Please enter a valid GitHub URL"`            |
-| 1004       | Repo not found or private           | `"Repository not found or is private"`         |
-| 1006       | Private repo not supported          | `"Only public repositories are supported"`     |
-| 1007       | Git clone failed                    | `"Failed to clone repository"`                 |
-| 1009       | Branch not found                    | `"Branch not found in repository"`             |
-| 2000       | Dockerfile not found                | `"Dockerfile not found at specified path"`     |
-| 2002       | Docker build failed                 | `"Build failed. Check your Dockerfile"`        |
-| 2006       | No ports available                  | `"No available ports (server at capacity)"`    |
-| 3000       | App not found                       | `"App not found"`                              |
-
----
-
-## 8. Auth Flow (Frontend)
-
-```
-USER OPENS APP
-    │
-    ▼
-Check Zustand: accessToken?
-    │
-    ├── YES → render app normally
-    │
-    └── NO → redirect to /login
-              │
-              ▼
-         User submits login form
-              │
-              ▼
-         POST /api/v1/auth/login
-              │
-              ├── 200 OK → { access_token }
-              │   ├── Store access_token in Zustand (memory only, not localStorage)
-              │   ├── Refresh token set as HttpOnly cookie by server
-              │   └── Redirect to /
-              │
-              └── 401 → show "Invalid email or password"
-
-
-EVERY API REQUEST
-    │
-    ▼
-Axios interceptor adds: Authorization: Bearer <access_token>
-    │
-    ├── 200 → OK, proceed
-    │
-    └── 401 → interceptor auto-calls POST /api/v1/auth/refresh
-              │
-              ├── 200 → new access_token → retry original request
-              │
-              └── 401 → clear store → redirect to /login
-```
-
-### Zustand Auth Store
-
-```ts
-// src/store/authStore.ts
-import { create } from "zustand";
-
-interface AuthState {
+interface AuthStore {
   accessToken: string | null;
-  user: { username: string; email: string; role: string } | null;
-  setToken: (token: string) => void;
-  setUser: (user: AuthState["user"]) => void;
-  clear: () => void;
+  user: User | null;
+  setAccessToken: (token: string) => void;
+  setUser: (user: User) => void;
+  clearAuth: () => void;
 }
 
-export const useAuthStore = create<AuthState>((set) => ({
+export const useAuthStore = create<AuthStore>((set) => ({
   accessToken: null,
   user: null,
-  setToken: (token) => set({ accessToken: token }),
+  setAccessToken: (token) => set({ accessToken: token }),
   setUser: (user) => set({ user }),
-  clear: () => set({ accessToken: null, user: null }),
+  clearAuth: () => set({ accessToken: null, user: null }),
 }));
 ```
 
 ---
 
-## 9. Docker Setup
+## 8. Pages & Routes
 
-The React app is built as a static bundle and served via Nginx inside Docker.
+```
+/                   → redirect to /dashboard (if authed) or /login
+/login              → LoginPage        (public)
+/signup             → SignupPage       (public)
+/dashboard          → DashboardPage    🔒
+/apps/new           → NewAppPage       🔒
+/apps/:id           → AppDetailPage    🔒
+*                   → NotFoundPage
+```
 
-### `Dockerfile`
+### Route Setup
+
+```tsx
+// src/router/index.tsx
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import ProtectedRoute from './ProtectedRoute';
+
+export default function AppRouter() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<Navigate to="/dashboard" replace />} />
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/signup" element={<SignupPage />} />
+        <Route element={<ProtectedRoute />}>
+          <Route element={<AppShell />}>
+            <Route path="/dashboard" element={<DashboardPage />} />
+            <Route path="/apps/new" element={<NewAppPage />} />
+            <Route path="/apps/:id" element={<AppDetailPage />} />
+          </Route>
+        </Route>
+        <Route path="*" element={<NotFoundPage />} />
+      </Routes>
+    </BrowserRouter>
+  );
+}
+```
+
+```tsx
+// src/router/ProtectedRoute.tsx
+import { Navigate, Outlet } from 'react-router-dom';
+import { useAuthStore } from '../store/auth.store';
+
+export default function ProtectedRoute() {
+  const { accessToken } = useAuthStore();
+  if (!accessToken) return <Navigate to="/login" replace />;
+  return <Outlet />;
+}
+```
+
+---
+
+## 9. Forms — Every Field, Label, Validation
+
+All validation rules come directly from the backend schemas and `field_validator` logic.
+
+---
+
+### Form 1 — Sign Up
+
+**Route:** `/signup` → `POST /api/v1/auth/register`
+
+| Field | Label | Type | Placeholder | Rules |
+|-------|-------|------|-------------|-------|
+| `username` | Username | text | `alice` | Required · min 3 · max 50 · only `a-z A-Z 0-9 _` |
+| `email` | Email address | email | `alice@example.com` | Required · valid email format |
+| `password` | Password | password | `••••••••` | Required · min 8 chars |
+| `confirmPassword` | Confirm password | password | `••••••••` | Must match `password` (client-side only) |
+
+**Submit button:** `Create account`
+
+**After success:** Show toast "Account created!" → redirect to `/login`
+
+**Error handling:**
+```
+409 with "Email already registered"    → show under email field
+409 with "Username already registered" → show under username field
+422                                    → show field-level Zod errors
+```
+
+**Link below form:** Already have an account? [Log in] → `/login`
+
+---
+
+### Form 2 — Log In
+
+**Route:** `/login` → `POST /api/v1/auth/login`
+
+| Field | Label | Type | Placeholder | Rules |
+|-------|-------|------|-------------|-------|
+| `email` | Email address | email | `alice@example.com` | Required |
+| `password` | Password | password | `••••••••` | Required |
+
+**Submit button:** `Log in`
+
+**After success:** `GET /api/v1/auth/me` → store user → redirect to `/dashboard`
+
+**Error handling:**
+```
+401 → show banner "Invalid email or password" (do NOT say which one is wrong)
+```
+
+**Link below form:** Don't have an account? [Sign up] → `/signup`
+
+---
+
+### Form 3 — Create App
+
+**Route:** `/apps/new` → `POST /api/v1/apps/create`
+
+#### Section 1 — Basic Info
+
+| Field | Label | Type | Placeholder | Default | Rules |
+|-------|-------|------|-------------|---------|-------|
+| `name` | App name | text | `my-web-app` | — | Required · min 3 · max 255 |
+| `repo_url` | GitHub repository URL | url | `https://github.com/user/repo` | — | Required · must start with `https://github.com/` |
+
+#### Section 2 — Build Config
+
+| Field | Label | Type | Placeholder | Default | Rules |
+|-------|-------|------|-------------|---------|-------|
+| `container_port` | Container port | number | `8000` | — | Required · integer · 1–65535 |
+| `branch` | Branch | text | `main` | `main` | Optional |
+| `source_dir` | Source directory | text | `.` | `.` | Optional |
+| `dockerfile_path` | Dockerfile path | text | `Dockerfile` | `Dockerfile` | Optional |
+
+#### Section 3 — Environment Variables
+
+Dynamic key-value editor (add/remove rows):
+
+| Sub-field | Label | Type | Placeholder |
+|-----------|-------|------|-------------|
+| key | Key | text | `DATABASE_URL` |
+| value | Value | text | `postgres://...` |
+
+**Add row button:** `+ Add variable`
+
+**Submit button:** `Create app`
+
+**After success:**
+- Show toast `"App created successfully"`
+- Redirect to `/apps/{id}` (use the `id` from the response)
+
+---
+
+### Form 4 — Deploy App
+
+**Location:** Inside `/apps/:id` page, in a "Deploy" panel
+**Endpoint:** `POST /api/v1/apps/{app_id}/deploy`
+
+> All fields are **optional overrides** for this deploy. Show current saved values as placeholders.
+
+| Field | Label | Type | Placeholder | Default |
+|-------|-------|------|-------------|---------|
+| `branch` | Branch | text | *(current app branch)* | leave blank = no change |
+| `source_dir` | Source directory | text | *(current source_dir)* | leave blank = no change |
+| `dockerfile_path` | Dockerfile path | text | *(current dockerfile_path)* | leave blank = no change |
+
+#### Deploy Options (collapsible "Advanced" section)
+
+| Field | Label | Type | Default | Notes |
+|-------|-------|------|---------|-------|
+| `force_rebuild` | Force fresh clone | checkbox | `false` | Deletes cloned repo, re-clones from scratch |
+| `clear_cache` | Disable Docker build cache | checkbox | `false` | Passes `--no-cache` to `docker build` |
+| `build_args` | Build arguments | key-value editor | `{}` | Docker build-time `ARG` values |
+| `env` | Environment variable overrides | key-value editor | `{}` | Overrides env for this deploy |
+
+**Submit button:** `Deploy`
+
+**Loading state:** Button shows `Deploying…` spinner. Disable all fields. Keep loading until response (deploy is synchronous — may take 30–120 seconds).
+
+**After success:**
+- Show toast `"Deployment successful"` (green)
+- Refresh app status badge to `running`
+
+**After error (500):**
+- Show toast `"Deployment failed"` (red)
+- Refresh app status badge to `error`
+
+---
+
+## 10. UI States to Handle
+
+### App Status Badge
+
+Map the `status` string to a badge:
+
+| Value | Label | Colour |
+|-------|-------|--------|
+| `created` | Created | Grey |
+| `prepared` | Preparing | Blue |
+| `running` | Running | Green |
+| `error` | Error | Red |
+
+### Dashboard — App Card
+
+Show for each app in `/api/v1/apps/list/`:
+
+```
+┌─────────────────────────────────────────────┐
+│  ● Running          my-web-app              │
+│                                             │
+│  github.com/user/repo  ·  main              │
+│  app-42.yourdomain.com                      │
+│                                   [Deploy]  │
+└─────────────────────────────────────────────┘
+```
+
+Fields to display: `name`, `status` badge, `repo_url` (short), `branch`, `subdomain` as link.
+
+### App Detail Page (`/apps/:id`)
+
+Two-column layout:
+
+**Left column — Info panel:**
+```
+Name:           my-web-app
+Status:         ● Running
+Subdomain:      app-42.yourdomain.com  ↗
+Repository:     github.com/user/repo   ↗
+Branch:         main
+Container port: 8000
+Internal port:  10042  (null until deployed)
+Source dir:     .
+Dockerfile:     Dockerfile
+Created:        12 Mar 2026, 14:32
+Last updated:   12 Mar 2026, 15:01
+```
+
+**Right column — Deploy panel:**
+Deploy form (Form 4 above) + Danger zone with Delete button.
+
+### Delete Confirmation Modal
+
+Before calling `DELETE /api/v1/apps/delete/{id}`:
+```
+Are you sure you want to delete "my-web-app"?
+This will stop the container, remove all files, and cannot be undone.
+
+[Cancel]  [Delete app]
+```
+
+### Empty Dashboard State
+
+When `GET /api/v1/apps/list/` returns `[]`:
+
+```
+        🚀
+   No apps yet
+   Deploy your first GitHub repo in seconds.
+
+        [Create your first app]
+```
+
+### Error State (API down / network error)
+
+```
+  ⚠ Something went wrong
+  Unable to reach the server. Check your connection.
+  [Retry]
+```
+
+### Full-page loader (on app boot — checking session)
+
+Show a centred spinner while calling `POST /api/v1/auth/refresh` on startup. Replace once resolved.
+
+---
+
+## 11. Design Tokens
+
+```ts
+// tailwind.config.ts — extend with these
+colors: {
+  background:  '#0a0a0a',   // near-black page bg (Vercel-style)
+  surface:     '#111111',   // cards, inputs
+  border:      '#1f1f1f',   // subtle borders
+  muted:       '#888888',   // secondary text
+  accent:      '#ffffff',   // primary text, active items
+  success:     '#22c55e',   // running badge
+  danger:      '#ef4444',   // error badge, delete button
+  warning:     '#f59e0b',   // prepared badge
+  info:        '#3b82f6',   // created badge, links
+}
+fontFamily: {
+  sans: ['Inter', 'system-ui', 'sans-serif'],
+  mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
+}
+```
+
+---
+
+## 12. Docker Setup
+
+### `Dockerfile.frontend`
 
 ```dockerfile
-# ────────────────────────────────────────
-# Stage 1: Build the React app
-# ────────────────────────────────────────
+# ── Stage 1: build ─────────────────────────────────────────────────────────
 FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Install dependencies (cached layer)
-COPY package.json package-lock.json ./
+COPY package*.json ./
 RUN npm ci
 
-# Copy source + build
 COPY . .
-ARG VITE_API_URL
-ENV VITE_API_URL=$VITE_API_URL
+
+# Inject API URL at build time
+ARG VITE_API_BASE_URL=http://localhost:8000
+ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
+
 RUN npm run build
+# Output is in /app/dist
 
-# ────────────────────────────────────────
-# Stage 2: Serve with Nginx
-# ────────────────────────────────────────
-FROM nginx:1.27-alpine AS runner
+# ── Stage 2: serve ─────────────────────────────────────────────────────────
+FROM nginx:1.27-alpine
 
-# Remove default config
-RUN rm /etc/nginx/conf.d/default.conf
+# SPA fallback — all unknown paths serve index.html (React Router handles them)
+COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-# Copy Nginx config
-COPY nginx.conf /etc/nginx/conf.d/app.conf
-
-# Copy built app
 COPY --from=builder /app/dist /usr/share/nginx/html
 
-EXPOSE 80
+EXPOSE 3000
 
 CMD ["nginx", "-g", "daemon off;"]
 ```
 
-### `docker-compose.yml`
-
-```yaml
-version: "3.9"
-
-services:
-  # ── React Frontend ──────────────────────────────────────────
-  frontend:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
-    image: gitdeploy-ui:latest
-    container_name: gitdeploy-frontend
-    ports:
-      - "3000:80"        # host:container
-    restart: unless-stopped
-    environment:
-      - NGINX_HOST=localhost
-    networks:
-      - gitdeploy-net
-
-  # ── Backend API (reference — run separately) ─────────────────
-  # Uncomment if running full stack with this compose file
-  # backend:
-  #   image: gitdeploy-api:latest
-  #   container_name: gitdeploy-backend
-  #   ports:
-  #     - "8000:8000"
-  #   networks:
-  #     - gitdeploy-net
-
-networks:
-  gitdeploy-net:
-    driver: bridge
-```
-
-### Build & Run Commands
-
-```bash
-# Development
-npm run dev
-
-# Build image
-docker build \
-  --build-arg VITE_API_URL=http://localhost:8000 \
-  -t gitdeploy-ui:latest .
-
-# Run container
-docker run -p 3000:80 gitdeploy-ui:latest
-
-# With docker-compose
-docker-compose up --build
-docker-compose down
-```
-
 ---
 
-## 10. Nginx Configuration
+### `nginx.conf` (inside container — serves the built React app)
 
-### `nginx.conf` — Serves React SPA + Proxies API
+> This is NOT a reverse proxy. It only serves static files and handles SPA routing.
 
 ```nginx
 server {
-    listen 80;
+    listen 3000;
     server_name _;
 
-    # ── Serve React static files ──────────────────────────────
     root /usr/share/nginx/html;
     index index.html;
 
-    # ── SPA routing: always serve index.html for unknown paths ─
+    # React Router — send all non-file requests to index.html
     location / {
         try_files $uri $uri/ /index.html;
     }
 
-    # ── Proxy API requests to backend ─────────────────────────
-    # Uncomment this block when frontend and backend
-    # are deployed behind the same Nginx reverse proxy
-    #
-    # location /api/ {
-    #     proxy_pass          http://gitdeploy-backend:8000;
-    #     proxy_http_version  1.1;
-    #     proxy_set_header    Host              $host;
-    #     proxy_set_header    X-Real-IP         $remote_addr;
-    #     proxy_set_header    X-Forwarded-For   $proxy_add_x_forwarded_for;
-    #     proxy_set_header    X-Forwarded-Proto $scheme;
-    #     proxy_read_timeout  90;
-    # }
-
-    # ── Gzip compression ──────────────────────────────────────
-    gzip on;
-    gzip_types text/plain text/css application/json application/javascript
-               text/javascript image/svg+xml;
-    gzip_min_length 1024;
-
-    # ── Cache static assets ───────────────────────────────────
-    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff2?)$ {
+    # Cache static assets
+    location ~* \.(js|css|png|svg|ico|woff2)$ {
         expires 1y;
         add_header Cache-Control "public, immutable";
-        access_log off;
     }
 
-    # ── Security headers ──────────────────────────────────────
-    add_header X-Frame-Options         "SAMEORIGIN"   always;
-    add_header X-Content-Type-Options  "nosniff"      always;
-    add_header X-XSS-Protection        "1; mode=block" always;
-    add_header Referrer-Policy         "strict-origin-when-cross-origin" always;
-}
-```
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN";
+    add_header X-Content-Type-Options "nosniff";
 
-### Future: Full Nginx Reverse Proxy (Production)
-
-When deploying both frontend and backend behind a single domain:
-
-```nginx
-# /etc/nginx/sites-available/gitdeploy.conf
-
-# ── Frontend (React) ──────────────────────────────────────────
-server {
-    listen 80;
-    server_name app.yourdomain.com;
-
-    location / {
-        proxy_pass http://127.0.0.1:3000;
-    }
-}
-
-# ── Backend (FastAPI) ─────────────────────────────────────────
-server {
-    listen 80;
-    server_name api.yourdomain.com;
-
-    location / {
-        proxy_pass          http://127.0.0.1:8000;
-        proxy_set_header    Host            $host;
-        proxy_set_header    X-Real-IP       $remote_addr;
-        proxy_set_header    X-Forwarded-For $proxy_add_x_forwarded_for;
-    }
-}
-
-# ── Deployed Apps (subdomain routing) ────────────────────────
-# Each deployed app gets: app-{id}.yourdomain.com
-server {
-    listen 80;
-    server_name ~^app-(?<app_id>\d+)\.yourdomain\.com$;
-
-    location / {
-        # Port is dynamically assigned — backend manages this config
-        # Placeholder: backend writes port here on deploy
-        proxy_pass http://127.0.0.1:$app_port;
-    }
+    # Gzip
+    gzip on;
+    gzip_types text/plain text/css application/javascript application/json image/svg+xml;
 }
 ```
 
 ---
 
-## 11. Environment Variables
+### How it fits in `docker-compose.yml` (backend already has this)
 
-### `.env.example`
-
-```env
-# Backend API base URL (no trailing slash)
-# Development: http://localhost:8000
-# Production:  https://api.yourdomain.com
-VITE_API_URL=http://localhost:8000
-
-# App domain (used to construct live URLs: app-{id}.VITE_APP_DOMAIN)
-# Development: localhost
-# Production:  yourdomain.com
-VITE_APP_DOMAIN=localhost
+```yaml
+frontend:
+  build:
+    context: ./frontend
+    dockerfile: Dockerfile.frontend
+    args:
+      VITE_API_BASE_URL: https://api.yourdomain.com
+  container_name: gitdeploy-frontend
+  restart: unless-stopped
+  networks:
+    - web
+  labels:
+    - "traefik.enable=true"
+    - "traefik.http.routers.frontend.rule=Host(`yourdomain.com`) || Host(`www.yourdomain.com`)"
+    - "traefik.http.services.frontend.loadbalancer.server.port=3000"
 ```
 
-### `.env.development`
+> Traefik handles public routing. Nginx inside the container only does SPA fallback + static file serving. No port is exposed to the host.
 
-```env
-VITE_API_URL=http://localhost:8000
-VITE_APP_DOMAIN=localhost
-```
+---
 
-### `.env.production`
-
-```env
-VITE_API_URL=https://api.yourdomain.com
-VITE_APP_DOMAIN=yourdomain.com
-```
-
-### Using in Code
+### `vite.config.ts` (dev server proxy — avoids CORS in local dev)
 
 ```ts
-// Construct live app URL
-const liveUrl = `http://app-${app.id}.${import.meta.env.VITE_APP_DOMAIN}`;
-```
-
-### Vite Config
-
-```ts
-// vite.config.ts
-import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react";
-import path from "path";
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
-  resolve: {
-    alias: { "@": path.resolve(__dirname, "./src") },
-  },
   server: {
     port: 5173,
     proxy: {
-      // Dev proxy: forward /api/* to FastAPI (avoids CORS in dev)
-      "/api": {
-        target: "http://localhost:8000",
+      '/api': {
+        target: 'http://localhost:8000',
         changeOrigin: true,
+        // cookies are forwarded — refresh flow works in dev
       },
     },
   },
 });
 ```
 
----
-
-## Quick Start (Dev)
-
-```bash
-git clone <repo>
-cd gitdeploy-ui
-
-cp .env.example .env.development
-# Edit VITE_API_URL to point to running backend
-
-npm install
-npm run dev
-# → http://localhost:5173
-```
-
-## Quick Start (Docker)
-
-```bash
-docker-compose up --build
-# Frontend → http://localhost:3000
-```
+> In local dev, point `VITE_API_BASE_URL` to `''` (empty) so all `/api/*` calls go through the Vite proxy.
 
 ---
 
-*Spec version: 1.0 | Last updated: 2026-03-12 | Backend ref: gitDeploy FastAPI API v1*
+*gitDeploy Frontend Spec — generated 2026-03-12*
+*Based on: api/v1/auth.py · api/v1/apps.py · app/schemas/ · app/constants.py*
