@@ -22,10 +22,20 @@ connect_args = {}
 if "sqlite" in ASYNC_DATABASE_URL:
     connect_args["check_same_thread"] = False
 
+_pool_kwargs = {}
+if "sqlite" not in ASYNC_DATABASE_URL:
+    _pool_kwargs = {
+        "pool_size": 10,
+        "max_overflow": 20,
+        "pool_pre_ping": True,
+        "pool_recycle": 3600,
+    }
+
 engine = create_async_engine(
     ASYNC_DATABASE_URL,
     connect_args=connect_args,
     echo=False,
+    **_pool_kwargs,
 )
 
 AsyncSessionLocal = async_sessionmaker(

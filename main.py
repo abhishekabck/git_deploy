@@ -28,7 +28,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="gitDeploy",
     description="Self-hosted PaaS — deploy GitHub repos as Docker containers.",
-    version="2.0.0",
+    version="1.0.0",
     lifespan=lifespan,
 )
 
@@ -36,8 +36,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=Config.CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 app.include_router(api.router, prefix="/api")
@@ -51,4 +51,4 @@ logging.basicConfig(
 
 @app.get("/", tags=["health"])
 async def health():
-    return {"status": "healthy", "version": "2.0.0"}
+    return {"status": "healthy", "version": "1.0.0"}

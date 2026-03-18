@@ -5,6 +5,7 @@
       <module fileurl="file:///opt/apps/app-1/.idea/DSATracker.iml" filepath="/opt/apps/app-1/.idea/DSATracker.iml" />
       <module fileurl="file:///opt/apps/.idea/apps.iml" filepath="/opt/apps/.idea/apps.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/fastapi_nginx.iml" filepath="$PROJECT_DIR$/.idea/fastapi_nginx.iml" />
+      <module fileurl="file://$PROJECT_DIR$/../gitdeploy-ui/.idea/gitdeploy-ui.iml" filepath="$PROJECT_DIR$/../gitdeploy-ui/.idea/gitdeploy-ui.iml" />
     </modules>
   </component>
 </project>

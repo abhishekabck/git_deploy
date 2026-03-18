@@ -25,7 +25,7 @@ _CONF_TEMPLATE = """\
 # subdomain: {subdomain}.{domain}
 # auto-generated — do not edit manually
 server {{
-    listen 80;
+    listen {listen_port};
     server_name {subdomain}.{domain};
 
     location / {{
@@ -53,6 +53,7 @@ def _write_conf(app_id: int, subdomain: str, internal_port: int) -> None:
         subdomain=subdomain,
         domain=Config.APP_DOMAIN,
         internal_port=internal_port,
+        listen_port=Config.NGINX_LISTEN_PORT,
     )
 
     conf_file = conf_dir / f"app-{app_id}.conf"

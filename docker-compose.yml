@@ -1,0 +1,35 @@
+version: "3.8"
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gitdeploy-api
+    restart: unless-stopped
+    ports:
+      - "8082:8082"
+    env_file:
+      - .env
+    volumes:
+      - /opt/apps:/opt/apps
+      - /opt/logs:/opt/logs
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on: []
+    networks:
+      - gitdeploy
+
+  ui:
+    build:
+      context: ../gitdeploy-ui
+      dockerfile: Dockerfile
+    container_name: gitdeploy-ui
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    networks:
+      - gitdeploy
+
+networks:
+  gitdeploy:
+    driver: bridge

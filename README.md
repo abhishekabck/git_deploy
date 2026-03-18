@@ -10,7 +10,7 @@
 
 ---
 
-**gitDeploy** is a lightweight, self-hosted Platform as a Service. Point it at any public GitHub repository and it clones the code, builds a Docker image from your Dockerfile, runs the container on a dynamically allocated port, and wires up an Nginx reverse-proxy so the app is reachable at `app-{id}.yourdomain.com` — all through a single REST API call.
+**gitDeploy** is a lightweight, self-hosted Platform as a Service. Point it at any public GitHub repository and it clones the code, builds a Docker image from your Dockerfile, runs the container on a dynamically allocated port, and wires up an Nginx reverse-proxy so the app is reachable at `app-{id}.gitdeploy.online` — all through a single REST API call.
 
 No cloud vendor lock-in. No monthly platform fees. Full control over your infrastructure.
 
@@ -47,7 +47,7 @@ No cloud vendor lock-in. No monthly platform fees. Full control over your infras
                     └──────────┬───────────┘
                                │  HTTP / JSON (port 5173 dev)
               ┌────────────────▼────────────────────────┐
-              │           FastAPI  v2.0.0  :8000          │
+              │           FastAPI  v1.0.0  :8082          │
               │  /api/v1/auth    /api/v1/apps             │
               │  /api/v1/admin   /  (health)              │
               └────┬──────────────┬──────────────┬───────┘
@@ -85,9 +85,26 @@ No cloud vendor lock-in. No monthly platform fees. Full control over your infras
 
 ---
 
-## Quick Start
+## Prerequisites
 
-**Prerequisites:** Python 3.12+, Docker, Git. Nginx optional (needed for subdomain routing).
+Before running gitDeploy, ensure the following are installed and configured on your system:
+
+| Requirement | Purpose | Install |
+|-------------|---------|---------|
+| **Python 3.11+** | Backend runtime | `apt install python3 python3-venv python3-pip` |
+| **Docker Engine** | Build and run deployed apps | [docs.docker.com/engine/install](https://docs.docker.com/engine/install/) |
+| **Git** | Clone user repositories | `apt install git` |
+| **Nginx** | Subdomain reverse-proxy routing | `apt install nginx` |
+| **PostgreSQL** (recommended) | Production database | `apt install postgresql` or use Docker |
+| **Cloudflare account + `cloudflared`** | Public tunnel access (no open ports) | [developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) |
+| **A domain name** | For `app-{id}.yourdomain.com` routing | Any registrar; NS pointed to Cloudflare |
+| **Node.js 18+** (frontend only) | Build the React UI | `apt install nodejs npm` or use nvm |
+
+**System requirements:** Linux server (Debian/Ubuntu recommended), 2+ GB RAM, root or sudo access for Nginx/Docker.
+
+---
+
+## Quick Start
 
 **Step 1 — Clone and install**
 ```bash
@@ -117,30 +134,30 @@ alembic upgrade head
 
 **Step 4 — Start the API server**
 ```bash
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn main:app --host 0.0.0.0 --port 8082 --reload
 ```
 
 **Step 5 — Register, create, and deploy your first app**
 ```bash
 # Register a user
-curl -s -X POST http://localhost:8000/api/v1/auth/register \
+curl -s -X POST http://localhost:8082/api/v1/auth/register \
   -H "Content-Type: application/json" \
   -d '{"username":"alice","email":"alice@example.com","password":"secret123"}'
 
 # Login and capture the token
-TOKEN=$(curl -s -X POST http://localhost:8000/api/v1/auth/login \
+TOKEN=$(curl -s -X POST http://localhost:8082/api/v1/auth/login \
   -H "Content-Type: application/json" \
   -d '{"email":"alice@example.com","password":"secret123"}' \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
 
 # Create an app record
-curl -s -X POST http://localhost:8000/api/v1/apps/create \
+curl -s -X POST http://localhost:8082/api/v1/apps/create \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name":"hello-world","repo_url":"https://github.com/owner/repo","container_port":3000}'
 
 # Deploy it (clone + build + run)
-curl -s -X POST http://localhost:8000/api/v1/apps/1/deploy \
+curl -s -X POST http://localhost:8082/api/v1/apps/1/deploy \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{}'
@@ -185,7 +202,7 @@ The app is now running. With Nginx enabled and `APP_DOMAIN` set, it is reachable
 | DELETE | /users/{id}     | Delete user and cascade-delete all their apps   | Admin role |
 | GET    | /errors         | Paginated error log from the database           | Admin role |
 
-Interactive docs are available at `http://localhost:8000/docs` (Swagger UI) and `http://localhost:8000/redoc`.
+Interactive docs are available at `http://localhost:8082/docs` (Swagger UI) and `http://localhost:8082/redoc`.
 
 ---
 
@@ -217,6 +234,10 @@ The React admin panel (accessed at `/admin` in the frontend) provides:
 | `NGINX_ENABLED`                 | `false`                                        | Auto-write Nginx server blocks on deploy/delete    |
 | `NGINX_CONF_DIR`                | `/etc/nginx/gitdeploy.d`                       | Directory for per-app Nginx `.conf` files          |
 | `NGINX_AUTO_RELOAD`             | `false`                                        | Run `nginx -s reload` after each config change     |
+| `NGINX_LISTEN_PORT`             | `80`                                           | Port used in generated Nginx server blocks         |
+| `CF_ZONE_ID`                    | —                                              | Cloudflare Zone ID (for DNS management script)     |
+| `CF_API_TOKEN`                  | —                                              | Cloudflare API token with DNS write permission     |
+| `CF_TUNNEL_ID`                  | —                                              | Cloudflare Tunnel ID                               |
 | `SIDECAR_URL`                   | `http://localhost:8001`                        | URL of the Secret Manager Sidecar                  |
 | `SIDECAR_API_KEY`               | random per process start — **always set this** | Shared API key between main app and sidecar        |
 | `VALID_API_KEY`                 | `""`                                           | Optional static key for machine-to-machine access  |
@@ -249,7 +270,7 @@ The React admin panel (accessed at `/admin` in the frontend) provides:
 
 ### Local (development only)
 ```bash
-uvicorn main:app --reload --port 8000
+uvicorn main:app --reload --port 8082
 ```
 Apps are accessible on `localhost:<internal_port>`. No subdomain routing.
 
@@ -323,7 +344,7 @@ alembic upgrade head
 
 For multiple workers:
 ```bash
-uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
+uvicorn main:app --host 0.0.0.0 --port 8082 --workers 4
 ```
 
 Note: with multiple workers, `JWT_SECRET` must be set to a fixed value in `.env` (not auto-generated) so all workers share the same signing key.
@@ -380,6 +401,7 @@ gitDeploy/
 │   ├── remove_app_from_nginx.sh Manually remove an app from Nginx
 │   ├── setup_cloudflare_tunnel.sh  Create and configure Cloudflare tunnel
 │   ├── add_app_to_tunnel.sh    Add subdomain routing rule to tunnel config
+│   ├── cf_dns.sh               Cloudflare DNS record management (setup/list/add/delete)
 │   └── generate_nginx_conf.py  Python helper to render Nginx config template
 ├── migrations/                 Alembic migration scripts
 └── docs/                       All documentation files
@@ -397,7 +419,7 @@ gitDeploy/
 | `docs/UML.md`                  | Class, sequence, state, and component diagrams     |
 | `docs/DFD.md`                  | Data Flow Diagrams — Level 0, 1, and 2             |
 | `docs/ADMIN_GUIDE.md`          | Admin user guide                                   |
-| `docs/CHANGES.md`              | v2.0 changelog                                     |
+| `docs/CHANGES.md`              | Changelog                                          |
 | `docs/AUTH_GUIDE.md`           | Authentication deep-dive                           |
 | `docs/ERROR_SYSTEM.md`         | Error code reference                               |
 | `docs/SIDECAR_SETUP.md`        | Secret Manager Sidecar setup                       |

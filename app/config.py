@@ -33,6 +33,7 @@ class Config:
     NGINX_ENABLED: bool = os.getenv("NGINX_ENABLED", "false").lower() == "true"
     NGINX_CONF_DIR: str = os.getenv("NGINX_CONF_DIR", "/etc/nginx/gitdeploy.d")
     NGINX_AUTO_RELOAD: bool = os.getenv("NGINX_AUTO_RELOAD", "false").lower() == "true"
+    NGINX_LISTEN_PORT: int = int(os.getenv("NGINX_LISTEN_PORT", "80"))
 
     # CORS origins (comma-separated)
     CORS_ORIGINS: list[str] = [

@@ -6,6 +6,7 @@ from fastapi import Path as ApiPath
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Annotated, List
+from fastapi import Query
 from starlette import status
 from pathlib import Path
 
@@ -82,8 +83,8 @@ async def get_apps(
     db: db_dependency,
     current_user: user_dependency,
     filter_status: str | None = None,
-    page: int = 1,
-    size: int = 20,
+    page: int = Query(default=1, ge=1),
+    size: int = Query(default=20, ge=1, le=100),
 ):
     logger.info("Listing apps for user_id=%s", current_user.id)
 

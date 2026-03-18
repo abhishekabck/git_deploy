@@ -1,0 +1,11 @@
+.venv
+__pycache__
+*.pyc
+.git
+.idea
+*.db
+gitdeploy.db
+docs/
+RUNBOOK.md
+migrations/__pycache__
+release/

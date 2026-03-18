@@ -76,8 +76,8 @@ async def login(data: LoginRequest, response: Response, db: AsyncSession = Depen
         key=_REFRESH_COOKIE,
         value=refresh_token,
         httponly=True,
-        secure=False,
-        samesite="lax",
+        secure=True,
+        samesite="strict",
         max_age=_REFRESH_MAX_AGE,
         path=_REFRESH_COOKIE_PATH,
     )

@@ -1,0 +1,8 @@
+node_modules
+dist
+release
+.git
+electron
+*.AppImage
+*.deb
+*.zip

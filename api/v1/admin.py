@@ -11,6 +11,7 @@ from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette import status
 from typing import Annotated, List, Optional
+from fastapi import Query
 from pathlib import Path
 from pydantic import BaseModel
 
@@ -73,8 +74,8 @@ async def admin_list_apps(
     db: db_dep,
     _: admin_dep,
     filter_status: Optional[str] = None,
-    page: int = 1,
-    size: int = 50,
+    page: int = Query(default=1, ge=1),
+    size: int = Query(default=50, ge=1, le=100),
 ):
     query = select(AppModel)
     if filter_status and filter_status in [s.value for s in AppStatus]:
@@ -172,8 +173,8 @@ async def admin_delete_app(
 async def admin_list_users(
     db: db_dep,
     _: admin_dep,
-    page: int = 1,
-    size: int = 50,
+    page: int = Query(default=1, ge=1),
+    size: int = Query(default=50, ge=1, le=100),
 ):
     query = select(Users).order_by(Users.id.asc()).offset((page - 1) * size).limit(size)
     result = await db.execute(query)
@@ -263,8 +264,8 @@ async def admin_delete_user(
 async def admin_error_logs(
     db: db_dep,
     _: admin_dep,
-    page: int = 1,
-    size: int = 50,
+    page: int = Query(default=1, ge=1),
+    size: int = Query(default=50, ge=1, le=100),
 ):
     query = select(ErrorLog).order_by(ErrorLog.id.desc()).offset((page - 1) * size).limit(size)
     result = await db.execute(query)
