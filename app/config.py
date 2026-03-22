@@ -35,6 +35,13 @@ class Config:
     NGINX_AUTO_RELOAD: bool = os.getenv("NGINX_AUTO_RELOAD", "false").lower() == "true"
     NGINX_LISTEN_PORT: int = int(os.getenv("NGINX_LISTEN_PORT", "80"))
 
+    # SMTP — used for OTP and password reset emails
+    SMTP_EMAIL: str = os.getenv("SMTP_EMAIL", "")
+    SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "")
+
+    # Frontend URL — used to build password reset links
+    FRONTEND_URL: str = os.getenv("FRONTEND_URL", "http://localhost:5173")
+
     # CORS origins (comma-separated)
     CORS_ORIGINS: list[str] = [
         o.strip()

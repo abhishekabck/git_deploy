@@ -47,6 +47,29 @@ class LoginRequest(BaseModel):
     }
 
 
+class VerifyOtpRequest(BaseModel):
+    email: str
+    otp: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
+
+
+class ResendOtpRequest(BaseModel):
+    email: str
+
+
+class UpdatePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8, description="New password (min 8 chars)")
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str = Field(min_length=8, description="New password (min 8 chars)")
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
