@@ -20,6 +20,10 @@ No cloud vendor lock-in. No monthly platform fees. Full control over your infras
 
 - Deployment from GitHub URL — clone or re-pull, build, and run in one request
 - Per-user multi-tenancy with JWT authentication (access token + HttpOnly refresh cookie)
+- Email verification on registration — 6-digit OTP sent via Gmail SMTP, backed by Redis with a 10-minute TTL and 60-second resend cooldown; login is blocked until the account is verified
+- Password reset via email — secure `token_urlsafe(32)` link with a 15-minute TTL; single-use (token deleted on redemption)
+- Change password in-session — authenticated endpoint that requires the current password before allowing an update
+- Templated transactional email system (`CommunicationBuilder`) — pluggable `Template` base class; ships with `OtpTemplate` and `PasswordResetTemplate` (HTML emails)
 - Admin role with full system control over all apps, users, and error logs
 - Async throughout — FastAPI + SQLAlchemy 2.0 async, `asyncio.to_thread` for Docker and Git
 - Automatic port allocation in range 10000-65535, verified against both the DB and the OS socket layer
@@ -124,6 +128,15 @@ BASE_APPS_DIR=/opt/apps
 BASE_LOGS_DIR=/opt/logs
 APP_DOMAIN=localhost
 CORS_ORIGINS=http://localhost:5173
+FRONTEND_URL=http://localhost:5173
+
+# Email — required for OTP verification and password reset
+SMTP_EMAIL=your@gmail.com
+SMTP_PASSWORD=your-gmail-app-password
+
+# Redis — required for OTP and password reset token storage
+REDIS_ENABLED=true
+REDIS_URL=redis://localhost:6379/0
 EOF
 ```
 
@@ -137,17 +150,22 @@ alembic upgrade head
 uvicorn main:app --host 0.0.0.0 --port 8082 --reload
 ```
 
-**Step 5 — Register, create, and deploy your first app**
+**Step 5 — Register, verify, and deploy your first app**
 ```bash
-# Register a user
+# Register a user (triggers an OTP email to alice@example.com)
 curl -s -X POST http://localhost:8082/api/v1/auth/register \
   -H "Content-Type: application/json" \
-  -d '{"username":"alice","email":"alice@example.com","password":"secret123"}'
+  -d '{"username":"alice","email":"alice@example.com","password":"Secret123"}'
+
+# Verify the account with the OTP received by email
+curl -s -X POST http://localhost:8082/api/v1/auth/verify-otp \
+  -H "Content-Type: application/json" \
+  -d '{"email":"alice@example.com","otp":"123456"}'
 
 # Login and capture the token
 TOKEN=$(curl -s -X POST http://localhost:8082/api/v1/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"email":"alice@example.com","password":"secret123"}' \
+  -d '{"email":"alice@example.com","password":"Secret123"}' \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
 
 # Create an app record
@@ -171,13 +189,18 @@ The app is now running. With Nginx enabled and `APP_DOMAIN` set, it is reachable
 
 ### Authentication — `/api/v1/auth`
 
-| Method | Endpoint    | Description                              | Auth           |
-|--------|-------------|------------------------------------------|----------------|
-| POST   | /register   | Create a new user account                | Public         |
-| POST   | /login      | Authenticate; returns access token + sets HttpOnly refresh cookie | Public |
-| POST   | /refresh    | Issue new access token using refresh cookie | Cookie only |
-| POST   | /logout     | Clear the refresh-token cookie           | Public         |
-| GET    | /me         | Return the currently authenticated user  | Bearer token   |
+| Method | Endpoint           | Description                                                        | Auth           |
+|--------|--------------------|--------------------------------------------------------------------|----------------|
+| POST   | /register          | Create a new user account and send a verification OTP by email     | Public         |
+| POST   | /verify-otp        | Verify email address with the 6-digit OTP                          | Public         |
+| POST   | /resend-otp        | Resend OTP (60-second cooldown enforced)                           | Public         |
+| POST   | /login             | Authenticate; returns access token + sets HttpOnly refresh cookie. Blocked if email is unverified | Public |
+| POST   | /refresh           | Issue a new access token using the refresh cookie                  | Cookie only    |
+| POST   | /logout            | Clear the refresh-token cookie                                     | Public         |
+| GET    | /me                | Return the currently authenticated user                            | Bearer token   |
+| PUT    | /me/password       | Change password (requires current password)                        | Bearer token   |
+| POST   | /forgot-password   | Send a password reset link to the given email (always returns 200) | Public         |
+| POST   | /reset-password    | Set a new password using the token from the reset email            | Public         |
 
 ### Apps — `/api/v1/apps`
 
@@ -238,6 +261,9 @@ The React admin panel (accessed at `/admin` in the frontend) provides:
 | `CF_ZONE_ID`                    | —                                              | Cloudflare Zone ID (for DNS management script)     |
 | `CF_API_TOKEN`                  | —                                              | Cloudflare API token with DNS write permission     |
 | `CF_TUNNEL_ID`                  | —                                              | Cloudflare Tunnel ID                               |
+| `SMTP_EMAIL`                    | `""`                                           | Gmail address used to send OTP and password reset emails |
+| `SMTP_PASSWORD`                 | `""`                                           | Gmail App Password (not the account password)      |
+| `FRONTEND_URL`                  | `http://localhost:5173`                        | Base URL prepended to password reset links in emails |
 | `SIDECAR_URL`                   | `http://localhost:8001`                        | URL of the Secret Manager Sidecar                  |
 | `SIDECAR_API_KEY`               | random per process start — **always set this** | Shared API key between main app and sidecar        |
 | `VALID_API_KEY`                 | `""`                                           | Optional static key for machine-to-machine access  |
@@ -360,7 +386,8 @@ gitDeploy/
 ├── alembic.ini
 ├── api/
 │   └── v1/
-│       ├── auth.py             Register, login, refresh, logout, /me
+│       ├── auth.py             Register, verify-otp, resend-otp, login, refresh, logout,
+│       │                       /me, /me/password, forgot-password, reset-password
 │       ├── apps.py             Create, list, detail, deploy, delete
 │       └── admin.py            Health, all apps/users/errors (admin only)
 ├── app/
@@ -377,6 +404,8 @@ gitDeploy/
 │   ├── schemas/                Pydantic v2 request and response schemas
 │   ├── services/
 │   │   ├── auth.py             JWT creation, decoding, get_current_user
+│   │   ├── CommunicationBuilder.py  Templated email sender (OtpTemplate, PasswordResetTemplate)
+│   │   ├── otp_manager.py      OTP generate / send / verify (Redis-backed, cooldown enforced)
 │   │   ├── deploy.py           GitHub validation, git clone/pull/branch
 │   │   ├── docker.py           docker build / run / rm (CLI subprocess)
 │   │   ├── docker_command_builder.py  Builder pattern for Docker CLI args
