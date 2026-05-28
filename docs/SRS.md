@@ -1,411 +1,809 @@
-# Software Requirements Specification — gitDeploy
-
-**Document version:** 2.0
-**Date:** 2026-03-17
-**Status:** Approved
+# Software Requirements Specification — gitDeploy v2
+**Self-Hosted Automated Deployment Platform**
+Version: 2.0 | Date: 2026-04-29 | Status: Planning (Rebuild from scratch)
 
 ---
 
 ## Table of Contents
-
-1. Introduction
-2. Overall Description
-3. Specific Requirements
-4. Non-Functional Requirements
-5. System Constraints
-6. External Interface Requirements
-
----
-
-## 1. Introduction
-
-### 1.1 Purpose
-
-This Software Requirements Specification (SRS) defines the functional and non-functional requirements for gitDeploy v2.0, a self-hosted Platform as a Service (PaaS). The document is intended for developers contributing to the project, system administrators operating the platform, and evaluators assessing the system.
-
-### 1.2 Scope
-
-gitDeploy enables registered users to deploy public GitHub repositories as containerised applications on a host server. The system handles the full lifecycle: repository validation, code cloning, Docker image building, container execution, network routing, and secret management. Users interact through a REST API and a React-based web dashboard. An administrator role provides system-wide visibility and control.
-
-The system does not:
-- Support private GitHub repositories (current version)
-- Manage DNS records automatically (only generates Nginx and Cloudflare Tunnel configuration)
-- Provide billing or payment processing (the `billing_type` field is a placeholder for future use)
-- Orchestrate containers across multiple hosts (single-server deployment only)
-
-### 1.3 Definitions, Acronyms, and Abbreviations
-
-| Term          | Definition                                                                                   |
-|---------------|----------------------------------------------------------------------------------------------|
-| App           | A deployable unit consisting of a GitHub repository, Docker configuration, and runtime state |
-| Container     | A Docker container running an app image                                                       |
-| Internal port | The host-side port (10000–65535) mapped to the container's exposed port                      |
-| Container port| The port the application inside the container listens on                                     |
-| Subdomain     | The `app-{id}.DOMAIN` address assigned to each deployed app                                  |
-| Sidecar       | The Secret Manager companion service running alongside the main API                           |
-| PaaS          | Platform as a Service                                                                         |
-| JWT           | JSON Web Token                                                                                |
-| ORM           | Object-Relational Mapper                                                                      |
-| DFD           | Data Flow Diagram                                                                             |
-
-### 1.4 References
-
-- FastAPI documentation: https://fastapi.tiangolo.com
-- SQLAlchemy 2.0 async documentation: https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html
-- Docker CLI reference: https://docs.docker.com/engine/reference/commandline/docker/
-- Cloudflare Tunnel documentation: https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/
-- Fernet specification: https://github.com/fernet/spec
-
-### 1.5 Document Overview
-
-- Section 2 describes the product context, major functions, and user types.
-- Section 3 specifies detailed functional requirements per module.
-- Section 4 specifies non-functional requirements.
-- Section 5 lists system constraints.
-- Section 6 describes external interface requirements.
+1. [Project Overview](#1-project-overview)
+2. [Goals & Scope](#2-goals--scope)
+3. [Stakeholders & User Roles](#3-stakeholders--user-roles)
+4. [Functional Requirements](#4-functional-requirements)
+5. [Non-Functional Requirements](#5-non-functional-requirements)
+6. [System Architecture Overview](#6-system-architecture-overview)
+7. [Directory Structure](#7-directory-structure)
+8. [Database Design](#8-database-design)
+9. [API Design](#9-api-design)
+10. [WebSocket Design](#10-websocket-design)
+11. [Deployment Pipeline Design](#11-deployment-pipeline-design)
+12. [Logging System Design](#12-logging-system-design)
+13. [Subdomain Management](#13-subdomain-management)
+14. [Security Design](#14-security-design)
+15. [Tech Stack Decisions](#15-tech-stack-decisions)
+16. [Glossary](#16-glossary)
 
 ---
 
-## 2. Overall Description
+## 1. Project Overview
 
-### 2.1 Product Perspective
+gitDeploy is a **self-hosted PaaS (Platform as a Service)** that automates the complete deployment lifecycle of GitHub repositories. It provisions Docker containers, allocates ports, configures Nginx reverse proxy, and exposes each deployed application at a unique subdomain — all triggered by a single API call.
 
-gitDeploy is a standalone web service deployed on a single Linux server. It exposes a REST API consumed by a React frontend and by direct API clients. It orchestrates three external subsystems: the Git CLI, the Docker daemon, and optionally Nginx. An optional Cloudflare Tunnel sits in front of Nginx to route public internet traffic without exposing TCP ports.
+**Live at:** gitdeploy.online
+
+### What It Solves
+Developers waste hours on repetitive deploy scripts, SSH sessions, and Nginx config edits.
+gitDeploy collapses that into: _push to GitHub → call API → app is live at {subdomain}.gitdeploy.online_.
+
+### v2 New Additions
+- Per-app **container resource monitoring** (CPU, memory, network) — not just host-level.
+- **User-defined subdomains** with real-time availability checking.
+- **Structured dual-DB logging** — PostgreSQL for pipeline audit + MongoDB for raw container logs.
+- **Celery task queue** replacing inline subprocess calls (survives server restarts).
+- Correlation ID logging and JSON-structured application logs.
+
+---
+
+## 2. Goals & Scope
+
+### In Scope
+- User registration, authentication (JWT + refresh tokens), email OTP verification.
+- App lifecycle: create → deploy → monitor → restart → stop → delete.
+- Real-time WebSocket log streaming (container stdout/stderr during deploy and runtime).
+- Real-time system and per-container resource metrics pushed via WebSocket.
+- Nginx reverse proxy auto-configuration per app.
+- Custom subdomain selection with uniqueness + format enforcement.
+- Structured application logging (internal audit/event logs).
+- Admin panel: manage users, view all apps, force-stop containers.
+
+### Out of Scope (v2)
+- Multi-node / Kubernetes orchestration.
+- Private GitHub repo support (OAuth token flow).
+- Billing / payment processing.
+- Custom domain (BYOD — bring your own domain) support.
+
+---
+
+## 3. Stakeholders & User Roles
+
+| Role | Description | Access |
+|------|-------------|--------|
+| `ADMIN` | Platform operator | All users, all apps, system metrics, force ops |
+| `USER` | Developer using the platform | Own apps only, own metrics, subdomain selection |
+
+**Billing Types (quota gate — implement later):**
+
+| Type | Limit |
+|------|-------|
+| `FREE` | 2 apps max |
+| `PAID` | Unlimited apps |
+
+---
+
+## 4. Functional Requirements
+
+### 4.1 Authentication & User Management
+- **FR-AUTH-01** User registers with username, email, password.
+- **FR-AUTH-02** Email OTP verification required before first login.
+- **FR-AUTH-03** Login returns short-lived access token (15 min) + long-lived refresh token (7 days).
+- **FR-AUTH-04** Refresh endpoint issues a new access token using the refresh token.
+- **FR-AUTH-05** Password reset via email OTP flow.
+- **FR-AUTH-06** Logout blacklists the current refresh token.
+- **FR-AUTH-07** Admin can disable/enable any user account.
+
+### 4.2 App Management
+- **FR-APP-01** User creates an app by providing: name, GitHub repo URL, branch, container port, Dockerfile path, source directory, environment variables.
+- **FR-APP-02** App gets a unique subdomain. Default: `app-{id}`. User may choose custom (§4.5).
+- **FR-APP-03** User triggers a deploy (clone/pull → build → run pipeline).
+- **FR-APP-04** User can restart a running app (stop container → re-run same image).
+- **FR-APP-05** User can stop a running app (status → STOPPED).
+- **FR-APP-06** User can delete an app: stop container, remove Docker image, remove Nginx conf, delete source files.
+- **FR-APP-07** App list supports pagination and status-based filtering.
+- **FR-APP-08** App detail returns: status, subdomain URL, env var keys (values masked), timestamps.
+
+### 4.3 Deployment Pipeline
+- **FR-DEPLOY-01** Validate GitHub repo URL is public and reachable (GitHub API check) before any git operation.
+- **FR-DEPLOY-02** Clone repo if not present; pull latest if already cloned.
+- **FR-DEPLOY-03** Check out the specified branch.
+- **FR-DEPLOY-04** Build Docker image from specified Dockerfile and build path.
+- **FR-DEPLOY-05** Allocate a free internal port (10000–65535) using DB lock + OS socket verification.
+- **FR-DEPLOY-06** Run the container with the allocated port, passing env vars.
+- **FR-DEPLOY-07** Write Nginx config for `{subdomain}.gitdeploy.online → 127.0.0.1:{port}` and hot-reload Nginx.
+- **FR-DEPLOY-08** Each pipeline step streams stdout/stderr in real time via WebSocket.
+- **FR-DEPLOY-09** Pipeline failures update app status to `ERROR` and record the failing step + reason.
+
+### 4.4 Real-Time Monitoring
+- **FR-MON-01** Host-level metrics (CPU %, memory %, disk %, network I/O) pushed via WebSocket every 5s.
+- **FR-MON-02** Per-container metrics (CPU %, memory %, network I/O) pushed per app via WebSocket. Source: `docker stats --no-stream`.
+- **FR-MON-03** Container metrics snapshotted to MongoDB every 60s by a Celery beat task for historical charts.
+
+### 4.5 Subdomain Management
+- **FR-SUB-01** Default subdomain assigned at app creation: `app-{id}`.
+- **FR-SUB-02** User can check availability of a custom subdomain before committing.
+- **FR-SUB-03** User can change subdomain only if: app is NOT RUNNING, and the name is not taken.
+- **FR-SUB-04** On subdomain change: remove old Nginx conf, write new one, hot-reload Nginx.
+- **FR-SUB-05** Subdomain validation: lowercase alphanumeric + hyphens, 3–63 chars, no leading/trailing hyphens.
+
+### 4.6 Logging System
+- **FR-LOG-01** All API requests logged with: timestamp, user_id, endpoint, method, status_code, duration_ms, request_id.
+- **FR-LOG-02** Deployment pipeline steps logged as rows in PostgreSQL `deployment_logs` (step, status, message, duration_ms).
+- **FR-LOG-03** Container stdout/stderr stored in MongoDB (one document per line: app_id, timestamp, stream, message).
+- **FR-LOG-04** User can query deployment history: list of deploy runs with step-by-step breakdown.
+- **FR-LOG-05** User can query container log history with time-range filters and cursor pagination.
+- **FR-LOG-06** Logs older than retention period (default: 30 days) auto-purged via MongoDB TTL index.
+
+### 4.7 Admin Features
+- **FR-ADMIN-01** List all users with app count and account status.
+- **FR-ADMIN-02** List all apps across all users.
+- **FR-ADMIN-03** Force-stop any running container.
+- **FR-ADMIN-04** View system-wide resource metrics.
+
+---
+
+## 5. Non-Functional Requirements
+
+### 5.1 Performance
+- **NFR-PERF-01** Read endpoint response: < 200ms P95 under 100 concurrent users.
+- **NFR-PERF-02** Deploy trigger (before async hand-off to Celery): < 500ms.
+- **NFR-PERF-03** WebSocket metric push latency: < 1s from collection to browser.
+- **NFR-PERF-04** Port allocation: < 50ms for up to 1,000 registered apps.
+
+### 5.2 Scalability
+- **NFR-SCALE-01** API layer is stateless — any shared state lives in Redis/DB. Multiple API instances can run behind a load balancer without session stickiness.
+- **NFR-SCALE-02** Celery workers scale independently of API workers (add more worker processes without changing API).
+- **NFR-SCALE-03** Database connection pooling via asyncpg (configurable pool size).
+- **NFR-SCALE-04** Port allocation uses `SELECT FOR UPDATE SKIP LOCKED` preventing race conditions under concurrent multi-tenant deployments.
+
+### 5.3 Reliability
+- **NFR-REL-01** Nginx reload failure → app.status = ERROR, container still runs, reason logged.
+- **NFR-REL-02** Deploy step failure → automatic cleanup: partial containers stopped, ports released.
+- **NFR-REL-03** On startup, reconcile app statuses against actual Docker container states.
+- **NFR-REL-04** Celery tasks: 3 retries with exponential backoff for transient failures.
+
+### 5.4 Security
+- **NFR-SEC-01** JWT secrets from environment only — never hardcoded.
+- **NFR-SEC-02** Passwords stored as bcrypt hashes (cost factor ≥ 12).
+- **NFR-SEC-03** Env var values never returned by API — keys only shown in responses.
+- **NFR-SEC-04** Auth endpoints rate-limited (login, register, OTP verify).
+- **NFR-SEC-05** Subdomain server-side validated with regex — no shell injection via nginx template.
+- **NFR-SEC-06** Repo URL validated against GitHub API before any git clone operation (prevents SSRF).
+
+### 5.5 Observability
+- **NFR-OBS-01** Structured JSON logs: `{ timestamp, level, logger, request_id, user_id, message }`.
+- **NFR-OBS-02** `request_id` (UUID) generated per HTTP request by middleware, stored in `contextvars.ContextVar` so all log calls in that request automatically include it.
+- **NFR-OBS-03** `GET /health` returns DB + Redis + MongoDB connectivity status.
+
+### 5.6 Maintainability
+- **NFR-MAINT-01** All schema changes via Alembic migrations only — no `Base.metadata.create_all` in production.
+- **NFR-MAINT-02** API versioned under `/api/v1/` — future breaking changes go to `/api/v2/`.
+- **NFR-MAINT-03** `services/` layer has zero FastAPI imports — callable from CLI, tests, and Celery tasks equally.
+- **NFR-MAINT-04** All configuration in `core/config.py` using Pydantic `BaseSettings`.
+
+---
+
+## 6. System Architecture Overview
 
 ```
-Internet User
-     |
-     | HTTPS
-     v
-Cloudflare Edge  ──(tunnel)──>  Nginx :80  ──>  Docker container :internal_port
-                                               (app-N.domain.com)
-
-Registered User
-     |
-     | HTTPS
-     v
-React Frontend  ──>  gitDeploy API :8000  ──>  DB (SQLite/PG)  ──>  Docker / Git
-                                          ──>  Secret Sidecar :8001
-                                          ──>  Redis (optional)
+┌──────────────────────────────────────────────────────────────────┐
+│                         CLIENT LAYER                             │
+│     React Dashboard (Vite + TypeScript)  │  REST Consumers       │
+└───────────────────────┬──────────────────────────────────────────┘
+                        │ HTTPS / WSS
+┌───────────────────────▼──────────────────────────────────────────┐
+│                        NGINX                                     │
+│  gitdeploy.online → FastAPI  │  app-{x}.gitdeploy.online → Docker│
+└───────────────────────┬──────────────────────────────────────────┘
+                        │
+┌───────────────────────▼──────────────────────────────────────────┐
+│                     FASTAPI APPLICATION                          │
+│                                                                  │
+│   Middleware: RequestID | AccessLog | RateLimit | CORS | Auth    │
+│                                                                  │
+│   ┌────────────────┐    ┌──────────────────┐                    │
+│   │  REST /api/v1  │    │  WebSocket /ws/* │                    │
+│   └───────┬────────┘    └────────┬─────────┘                    │
+│           └──────────┬───────────┘                              │
+│                      │ calls                                     │
+│   ┌──────────────────▼───────────────────────────────────────┐  │
+│   │                    Service Layer                         │  │
+│   │  AuthSvc │ AppSvc │ DeploySvc │ NginxSvc │ MetricsSvc   │  │
+│   └──────────────────┬───────────────────────────────────────┘  │
+│                      │ enqueues                                  │
+└──────────────────────┼───────────────────────────────────────────┘
+                       │
+┌──────────────────────▼───────────────────────────────────────────┐
+│                    CELERY WORKERS                                │
+│   clone_task │ build_task │ run_task │ log_tail │ purge (beat)  │
+└──────────────────────┬───────────────────────────────────────────┘
+                       │ reads/writes
+┌──────────────────────▼───────────────────────────────────────────┐
+│                    INFRASTRUCTURE                                │
+│  PostgreSQL (users, apps, deploy_logs)                           │
+│  MongoDB    (container_logs, container_metrics snapshots)        │
+│  Redis      (broker + pub/sub + cache + blacklist)               │
+│  Docker Engine                                                   │
+│  Nginx (reverse proxy)                                           │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-### 2.2 Product Functions
+### Component Responsibility Map
 
-The following are the high-level functions of the system:
-
-1. **User registration and authentication** — create accounts, authenticate with credentials, maintain sessions using JWT access and refresh tokens.
-2. **App registration** — record a user's intent to deploy a GitHub repository; validate the repository URL; assign a subdomain.
-3. **App deployment** — clone or update the source code, build a Docker image, allocate a host port, run a container, write Nginx routing configuration.
-4. **App management** — list, inspect, redeploy, and delete owned apps.
-5. **Secret management** — store and retrieve encrypted per-app environment variables via the sidecar service.
-6. **Administration** — monitor system health, manage all apps and users, view error logs.
-7. **Error tracking** — capture and persist error events with structured codes and context.
-8. **Optional caching** — accelerate read-heavy operations via Redis with namespace isolation.
-
-### 2.3 User Classes and Characteristics
-
-**Regular User**
-- Registers and authenticates via the web UI or API
-- Creates, deploys, and deletes their own apps
-- Cannot access other users' apps or system-wide data
-- Interacts primarily through the React frontend
-
-**Administrator**
-- Has `role=admin` in the database
-- Can view and manage all apps and all users across the system
-- Can force-delete any app or user (with full resource cleanup)
-- Can view the system error log and health metrics
-- Typically a server operator; may use the API directly or the admin section of the frontend
-
-**Machine Client (API consumer)**
-- Authenticates using a static `VALID_API_KEY` header (optional)
-- Suitable for CI/CD pipeline integrations
-
-### 2.4 Operating Environment
-
-- **Server OS:** Linux (Ubuntu 20.04+ recommended)
-- **Python:** 3.12+
-- **Docker Engine:** 24.0+ installed and accessible to the user running the API process
-- **Git:** 2.x installed and on PATH
-- **Database:** SQLite (development and small deployments) or PostgreSQL 14+ (production)
-- **Redis:** 6.0+ (optional)
-- **Nginx:** 1.18+ (optional, required for subdomain routing)
-- **Cloudflare Tunnel:** cloudflared binary (optional, required for zero-port-forward public access)
-
-### 2.5 Design and Implementation Constraints
-
-- The backend must remain fully asynchronous; blocking I/O must be wrapped in `asyncio.to_thread`.
-- Authentication must use JWT; no server-side session storage is permitted.
-- The error system must use the established numeric code ranges (1xxx-5xxx).
-- All environment-specific configuration must be read from environment variables; no hardcoded secrets.
-- The sidecar must run as a completely separate process with its own database.
-
-### 2.6 Assumptions and Dependencies
-
-- The server has outbound internet access to reach `api.github.com` for repository validation.
-- The Docker daemon socket is accessible to the process running gitDeploy (typically via group membership or running as root).
-- Port range 10000–65535 is not blocked by a firewall for internal loopback traffic.
-- Nginx is configured to include files from `NGINX_CONF_DIR` when `NGINX_ENABLED=true`.
+| Component | Job |
+|-----------|-----|
+| FastAPI | HTTP/WebSocket server, routing, auth enforcement |
+| Celery | Async deploy pipeline, log tailing, scheduled maintenance |
+| Redis | Celery broker, WebSocket pub/sub fan-out, token blacklist, rate limiting |
+| PostgreSQL | Users, apps, deployment step logs (relational, ACID) |
+| MongoDB | Container log lines, container metric snapshots (time-series, TTL) |
+| Nginx | Reverse proxy for API + per-app routing, TLS |
+| Docker | Container lifecycle |
 
 ---
 
-## 3. Specific Requirements
+## 7. Directory Structure
 
-### 3.1 Authentication Module
+This is the target layout you will build. Every folder is a deliberate boundary.
 
-**FR-AUTH-01 — User Registration**
-The system shall accept a `POST /api/v1/auth/register` request with `username`, `email`, and `password`. It shall validate that the email and username are not already registered (HTTP 409 on conflict). On success it shall store a bcrypt-hashed password and return the user profile with HTTP 201.
+```
+gitDeploy/                              ← project root (git repo)
+│
+├── backend/                            ← FastAPI app root
+│   ├── main.py                         ← create_app(), lifespan(), register routers + middleware
+│   ├── alembic.ini
+│   │
+│   ├── core/                           ← Framework plumbing. ZERO business logic here.
+│   │   ├── config.py                   ← Pydantic BaseSettings — every env var typed and documented
+│   │   ├── database.py                 ← SQLAlchemy async engine, AsyncSession factory
+│   │   ├── mongo.py                    ← Motor client + collection accessors (container_logs, metrics)
+│   │   ├── redis_client.py             ← aioredis connection pool
+│   │   ├── security.py                 ← jwt_encode, jwt_decode, bcrypt_hash, bcrypt_verify
+│   │   ├── logging.py                  ← JSON formatter, request_id ContextVar, get_logger()
+│   │   ├── middleware.py               ← RequestIDMiddleware, AccessLogMiddleware
+│   │   └── dependencies.py             ← Depends() factories: get_db, get_mongo, get_current_user, require_admin
+│   │
+│   ├── api/
+│   │   ├── __init__.py                 ← single APIRouter aggregating all v1 routers
+│   │   └── v1/
+│   │       ├── __init__.py
+│   │       ├── auth.py                 ← /register /login /refresh /verify-otp /forgot-password /logout
+│   │       ├── apps.py                 ← CRUD + /deploy /restart /stop
+│   │       ├── subdomains.py           ← /subdomains/check  PATCH /apps/{id}/subdomain
+│   │       ├── logs.py                 ← /apps/{id}/deployments  /apps/{id}/logs
+│   │       ├── metrics.py              ← /metrics/host  /apps/{id}/metrics  /apps/{id}/metrics/history
+│   │       ├── websocket.py            ← /ws/metrics/host  /ws/apps/{id}/metrics  /ws/apps/{id}/logs
+│   │       └── admin.py                ← /admin/* (role guard on entire router)
+│   │
+│   ├── models/                         ← SQLAlchemy ORM models only — no query logic
+│   │   ├── __init__.py
+│   │   ├── mixins.py                   ← TimestampMixin (created_at, updated_at auto-set)
+│   │   ├── user.py
+│   │   ├── app.py
+│   │   └── deployment_log.py           ← one row per pipeline step per deploy
+│   │
+│   ├── schemas/                        ← Pydantic v2 models for request validation + response shaping
+│   │   ├── __init__.py
+│   │   ├── auth.py
+│   │   ├── app.py
+│   │   ├── subdomain.py
+│   │   ├── logs.py
+│   │   └── metrics.py
+│   │
+│   ├── services/                       ← Business logic. `import fastapi` is BANNED here.
+│   │   ├── __init__.py
+│   │   ├── auth_service.py             ← register, login, OTP, token management
+│   │   ├── app_service.py              ← app CRUD, subdomain change logic
+│   │   ├── deploy_service.py           ← orchestrates pipeline steps, calls workers
+│   │   ├── git_service.py              ← validate_repo, clone, pull, checkout_branch
+│   │   ├── docker_service.py           ← build, run, stop, remove, get_stats
+│   │   ├── port_manager.py             ← allocate_port (DB lock + socket verify)
+│   │   ├── nginx_service.py            ← write_conf, remove_conf, reload
+│   │   ├── metrics_service.py          ← host_metrics (psutil) + container_metrics (docker stats)
+│   │   ├── log_service.py              ← write/query deploy_logs (PG) + container_logs (Mongo)
+│   │   └── otp_service.py              ← generate, store in Redis, verify OTP
+│   │
+│   ├── workers/                        ← Celery tasks. Thin wrappers over services/. No logic here.
+│   │   ├── __init__.py
+│   │   ├── celery_app.py               ← Celery instance, Redis broker config, Beat schedule
+│   │   ├── deploy_tasks.py             ← chain: clone_task | build_task | run_task | nginx_task
+│   │   ├── cleanup_tasks.py            ← remove_container_task, remove_image_task, release_port_task
+│   │   └── maintenance_tasks.py        ← purge_old_logs_task (beat: daily), snapshot_metrics_task (beat: 60s)
+│   │
+│   ├── errors/
+│   │   ├── __init__.py
+│   │   ├── exceptions.py               ← All custom errors: AppNotFoundError, PortExhaustedError, etc.
+│   │   └── handlers.py                 ← register_handlers(app) called from main.py
+│   │
+│   ├── migrations/
+│   │   ├── env.py
+│   │   └── versions/
+│   │
+│   └── tests/
+│       ├── conftest.py                 ← Fixtures: test DB, async test client, fake user factory
+│       ├── test_auth.py
+│       ├── test_apps.py
+│       ├── test_deploy.py
+│       └── test_subdomains.py
+│
+├── frontend/                           ← React app (Vite + TypeScript)
+│   ├── index.html
+│   ├── vite.config.ts
+│   ├── tsconfig.json
+│   ├── package.json
+│   └── src/
+│       ├── main.tsx
+│       ├── App.tsx
+│       ├── api/                        ← Axios instances + typed API call functions
+│       │   ├── client.ts               ← base Axios, interceptors (attach token, handle 401 → refresh)
+│       │   ├── auth.ts
+│       │   ├── apps.ts
+│       │   └── metrics.ts
+│       ├── components/
+│       │   ├── AppCard.tsx
+│       │   ├── LogViewer.tsx           ← Virtualized scrollable log panel (react-virtual)
+│       │   ├── MetricsChart.tsx        ← Recharts line chart for CPU/memory history
+│       │   └── StatusBadge.tsx
+│       ├── pages/
+│       │   ├── Login.tsx
+│       │   ├── Dashboard.tsx
+│       │   ├── AppDetail.tsx
+│       │   └── Admin.tsx
+│       ├── hooks/
+│       │   ├── useWebSocket.ts         ← generic WS hook: connect, parse, auto-reconnect on close
+│       │   ├── useMetrics.ts
+│       │   └── useDeployLogs.ts
+│       └── store/
+│           ├── authStore.ts            ← Zustand: token, user
+│           └── appStore.ts             ← Zustand: app list, selected app
+│
+├── sidecar/                            ← Separate privileged agent (optional)
+│   ├── main.py
+│   ├── config.py
+│   └── crypto.py
+│
+├── nginx/
+│   ├── gitdeploy.conf                  ← Main nginx config (includes gitdeploy.d/*.conf)
+│   └── gitdeploy.d/                    ← Per-app configs, auto-managed by nginx_service.py
+│
+├── scripts/
+│   ├── setup_nginx.sh
+│   ├── setup_postgres.sh
+│   └── setup_mongo.sh
+│
+├── docs/
+│   ├── SRS.md                          ← This file
+│   └── ARCHITECTURE_IMPROVEMENTS.md
+│
+├── docker-compose.yml                  ← Dev: api + celery + postgres + mongo + redis
+├── .env.example
+├── .gitignore
+└── README.md
+```
 
-**FR-AUTH-02 — User Login**
-The system shall accept a `POST /api/v1/auth/login` request with `email` and `password`. It shall verify the credentials against the stored bcrypt hash. On success it shall:
-- Return an access token (HS256 JWT, `ACCESS_TOKEN_EXPIRE_MINUTES` TTL) in the JSON response body.
-- Set a `refresh_token` HttpOnly cookie scoped to `/api/v1/auth/refresh` with `max_age = REFRESH_TOKEN_EXPIRE_DAYS * 86400`.
-
-**FR-AUTH-03 — Token Refresh**
-The system shall accept a `POST /api/v1/auth/refresh` request. It shall read the `refresh_token` cookie, verify its signature and `type=refresh` claim, load the user from the database, and return a new access token. It shall return HTTP 401 if the cookie is absent, the signature is invalid, or the user no longer exists.
-
-**FR-AUTH-04 — Logout**
-The system shall accept a `POST /api/v1/auth/logout` request and respond with a `Set-Cookie` header that expires the `refresh_token` cookie immediately.
-
-**FR-AUTH-05 — Current User**
-The system shall accept a `GET /api/v1/auth/me` request with a valid Bearer access token and return the authenticated user's `id`, `username`, `email`, `role`, and `billing_type`.
-
-**FR-AUTH-06 — Role Enforcement**
-All endpoints in the admin router shall reject requests from non-admin users with HTTP 403.
-
-### 3.2 App Management Module
-
-**FR-APP-01 — Create App**
-The system shall accept a `POST /api/v1/apps/create` request containing `name`, `repo_url`, `container_port`, and optional `branch`, `source_dir`, `dockerfile_path`, `env` fields. It shall:
-- Validate that `repo_url` begins with `https://github.com/` and matches the `owner/repo` path format.
-- Call the GitHub API (`https://api.github.com/repos/{owner}/{repo}`) to confirm the repository exists and is public.
-- Create an `apps` database record with `status=created`.
-- Assign a subdomain of the form `app-{id}` after flush.
-- Return HTTP 201 with `id`, `subdomain`, `container_port`, and `status`.
-
-**FR-APP-02 — List Apps**
-The system shall accept a `GET /api/v1/apps/list/` request with optional `filter_status`, `page` (default 1), and `size` (default 20) query parameters. It shall return only apps owned by the authenticated user. It shall apply the status filter only for valid `AppStatus` values.
-
-**FR-APP-03 — Get App Detail**
-The system shall accept a `GET /api/v1/apps/{id}` request and return all fields of the app record. It shall return HTTP 404 if the app does not exist and HTTP 403 if the app belongs to a different user.
-
-**FR-APP-04 — Delete App**
-The system shall accept a `DELETE /api/v1/apps/delete/{id}` request and:
-- Verify ownership (HTTP 403 otherwise).
-- Stop and remove the Docker container if running (`docker rm -f`).
-- Remove the Docker image (`docker rmi -f`).
-- Delete the cloned code directory (`BASE_APPS_DIR/app-{id}`).
-- Delete the log directory (`BASE_LOGS_DIR/app-{id}`).
-- Remove the Nginx config file if `NGINX_ENABLED=true`.
-- Delete the database record.
-- Return HTTP 204.
-
-**FR-APP-05 — Deploy App**
-The system shall accept a `POST /api/v1/apps/{id}/deploy` request and execute the deployment pipeline:
-
-1. Verify ownership.
-2. Apply any overrides from the request body (`branch`, `dockerfile_path`, `source_dir`, `env`).
-3. If `force_rebuild=true`, delete the app directory before cloning.
-4. Clone the repository if the `.git` directory does not exist; otherwise `git pull`.
-5. Write env vars to `{app_dir}/.env` if provided.
-6. Set app `status=prepared` and commit.
-7. Switch to the configured branch.
-8. Verify the Dockerfile exists at `dockerfile_path`.
-9. Build a Docker image tagged `app_{id}_image:{unix_timestamp}` and `app_{id}_image:latest`, streaming build output to the logger.
-10. If a previous container exists, stop and remove it; set `internal_port=null` and commit.
-11. Allocate a free host port in range 10000–65535 (DB + OS socket check).
-12. Run the container detached with port mapping, resource limits, restart policy, and log rotation.
-13. Set app `status=running` and commit.
-14. Write the Nginx config file if `NGINX_ENABLED=true`.
-15. On any exception: set `status=error`, commit, and re-raise.
-
-**FR-APP-06 — Port Allocation**
-The port allocator shall iterate ports from 10000 to 65535. For each port it shall:
-- Skip ports already assigned to another app in the database.
-- Attempt to bind `0.0.0.0:{port}` with a TCP socket; skip if `OSError` is raised.
-- Return the first port that passes both checks.
-- Raise `NoAvailablePortError` (error code 2006) if no port is found.
-
-### 3.3 Admin Module
-
-**FR-ADMIN-01 — Health**
-`GET /api/v1/admin/health` shall return system metrics (CPU, memory, disk, network, uptime) and database aggregates (total apps, running apps, error apps, total users).
-
-**FR-ADMIN-02 — List All Apps**
-`GET /api/v1/admin/apps` shall return a paginated list of all apps from all users, including `user_id` on each item.
-
-**FR-ADMIN-03 — Update Any App**
-`PATCH /api/v1/admin/apps/{id}` shall allow updating `status` and `branch` of any app. Invalid status values shall be silently ignored.
-
-**FR-ADMIN-04 — Delete Any App**
-`DELETE /api/v1/admin/apps/{id}` shall perform the same full resource cleanup as FR-APP-04 but without ownership restriction.
-
-**FR-ADMIN-05 — List All Users**
-`GET /api/v1/admin/users` shall return a paginated list of all user accounts.
-
-**FR-ADMIN-06 — Update Any User**
-`PATCH /api/v1/admin/users/{id}` shall allow updating `role` and `billing_type` of any user.
-
-**FR-ADMIN-07 — Delete Any User**
-`DELETE /api/v1/admin/users/{id}` shall delete the user and cascade-delete all their apps with full Docker and filesystem cleanup.
-
-**FR-ADMIN-08 — Error Log**
-`GET /api/v1/admin/errors` shall return a paginated list of `ErrorLog` records ordered by `id` descending.
-
-### 3.4 Secret Manager Sidecar Module
-
-**FR-SIDECAR-01 — Store Secrets**
-`POST /secrets/{app_id}` shall accept a JSON body `{"secrets": {"KEY": "VALUE", ...}}`, serialize the dict to JSON, encrypt with Fernet using `SIDECAR_ENCRYPTION_KEY`, and upsert into the `secret_store` table.
-
-**FR-SIDECAR-02 — Retrieve Secrets**
-`GET /secrets/{app_id}` shall retrieve the encrypted record, decrypt it, parse the JSON, and return `{"app_id": N, "secrets": {...}}`. It shall return HTTP 404 if no record exists and HTTP 500 if decryption fails.
-
-**FR-SIDECAR-03 — Delete Secrets**
-`DELETE /secrets/{app_id}` shall remove the secret record for the given app.
-
-**FR-SIDECAR-04 — List Secret App IDs**
-`GET /secrets` shall return a list of all app IDs that have secrets stored.
-
-**FR-SIDECAR-05 — Key Rotation**
-`POST /admin/rotate-key` shall accept `{"new_key": "..."}`, iterate every record in the `secret_store` table, decrypt each with the current key, re-encrypt with the new key, persist to the database, and switch the in-memory key. Failures on individual records shall be logged but shall not abort the rotation of other records.
-
-**FR-SIDECAR-06 — API Key Authentication**
-All sidecar endpoints (except `/health`) shall require an `X-Api-Key` header matching `SIDECAR_API_KEY`. Requests with a missing or invalid key shall be rejected with HTTP 403.
-
-### 3.5 Error System
-
-**FR-ERR-01 — Error Code Ranges**
-Custom exceptions shall use numeric codes in these ranges:
-- 1000–1099: Git / Repository validation errors
-- 2000–2099: Docker errors
-- 3000–3099: App / Route-level errors
-- 4000–4099: Database / Infrastructure errors
-- 5000–5099: Internal / Catch-all errors
-
-**FR-ERR-02 — Database Logging**
-The exception handler (`exception_handler.py`) shall write every `AppBaseError` to the `error_logs` table with `error_code`, `status_code`, `app_id` (if resolvable from context), and `context` string.
-
-**FR-ERR-03 — Consistent HTTP Response**
-The exception handler shall return HTTP responses with a JSON body of `{"error_code": int, "status_code": int, "message": string}` for every `AppBaseError` subclass.
+### The Four Rules for Structural Discipline
+1. **`core/`** — framework wiring only. If it touches business logic, it belongs in `services/`.
+2. **`services/`** — pure Python functions. `from fastapi import ...` is a linting error in this folder.
+3. **`workers/`** — Celery tasks call exactly one `services/` function. No logic in task bodies.
+4. **`api/`** routes — three lines: validate → call service → return schema. DB queries belong in services, not routes.
 
 ---
 
-## 4. Non-Functional Requirements
+## 8. Database Design
 
-### 4.1 Performance
+### 8.1 PostgreSQL (Source of truth — relational, ACID)
 
-**NFR-PERF-01** — API response time for read endpoints (list apps, get app, auth/me) shall be under 100 ms at p95 for a database containing up to 1000 apps and 500 users on commodity hardware.
+**users**
+```sql
+id              SERIAL PRIMARY KEY
+username        VARCHAR(50) UNIQUE NOT NULL
+email           VARCHAR(255) UNIQUE NOT NULL
+hashed_password VARCHAR NOT NULL
+role            ENUM('user','admin') DEFAULT 'user'
+billing_type    ENUM('free','paid') DEFAULT 'free'
+is_verified     BOOLEAN DEFAULT false
+is_active       BOOLEAN DEFAULT true
+created_at      TIMESTAMPTZ DEFAULT now()
+updated_at      TIMESTAMPTZ
+```
 
-**NFR-PERF-02** — Deployment operations (git clone, docker build, docker run) are I/O and CPU bound. They shall not block the FastAPI event loop; all blocking calls shall be dispatched to `asyncio.to_thread`.
+**apps**
+```sql
+id              SERIAL PRIMARY KEY
+user_id         INTEGER REFERENCES users(id) ON DELETE CASCADE
+name            VARCHAR(100) NOT NULL
+subdomain       VARCHAR(63) UNIQUE NOT NULL       -- indexed
+repo_url        VARCHAR NOT NULL
+branch          VARCHAR DEFAULT 'main'
+build_path      VARCHAR DEFAULT '.'
+dockerfile_path VARCHAR DEFAULT 'Dockerfile'
+container_port  INTEGER NOT NULL CHECK(container_port BETWEEN 1024 AND 65535)
+internal_port   INTEGER UNIQUE                   -- host port, null until first deploy
+container_id    VARCHAR                          -- Docker container ID for docker stats
+env             JSONB DEFAULT '{}'
+status          ENUM('created','running','stopped','error','prepared') DEFAULT 'created'
+created_at      TIMESTAMPTZ DEFAULT now()
+updated_at      TIMESTAMPTZ
+```
 
-**NFR-PERF-03** — Port allocation shall complete in under 50 ms for a system with fewer than 10 000 allocated ports.
+**deployment_logs** (step-by-step pipeline audit)
+```sql
+id              SERIAL PRIMARY KEY
+app_id          INTEGER REFERENCES apps(id) ON DELETE CASCADE
+deploy_number   INTEGER NOT NULL               -- monotonically increasing per app
+step            VARCHAR(50) NOT NULL           -- 'git_clone' | 'docker_build' | 'docker_run' | 'nginx_setup'
+status          ENUM('started','success','failed')
+message         TEXT
+duration_ms     INTEGER
+created_at      TIMESTAMPTZ DEFAULT now()
 
-### 4.2 Security
+INDEX (app_id, deploy_number, created_at)
+```
 
-**NFR-SEC-01** — Passwords shall be hashed with bcrypt (minimum cost factor 12) before storage. Plaintext passwords shall never be logged or persisted.
+### 8.2 MongoDB (Log storage — append-only, TTL)
 
-**NFR-SEC-02** — JWT secrets (`JWT_SECRET`) shall not default to a static value in production. If not set, the system shall generate a random secret per process, which means tokens are invalidated on restart — this is acceptable for development but is logged as a warning.
+**Collection: container_logs**
+```json
+{
+  "_id": ObjectId,
+  "app_id": 42,
+  "deploy_number": 3,
+  "container_id": "abc123def456",
+  "timestamp": ISODate("2026-04-29T10:00:01.000Z"),
+  "stream": "stdout",
+  "message": "Server listening on port 3000"
+}
+```
+Indexes:
+- `{ app_id: 1, timestamp: -1 }` — fast time-range queries per app
+- TTL: `{ timestamp: 1 }` with `expireAfterSeconds: 2592000` (30 days)
 
-**NFR-SEC-03** — Refresh tokens shall be stored only in HttpOnly cookies. Access tokens shall be transmitted only in Authorization headers (never in cookies).
+**Collection: container_metrics** (Celery beat snapshots every 60s)
+```json
+{
+  "_id": ObjectId,
+  "app_id": 42,
+  "container_id": "abc123def456",
+  "timestamp": ISODate,
+  "cpu_percent": 12.4,
+  "memory_mb": 128.3,
+  "memory_limit_mb": 512.0,
+  "net_in_mb": 0.2,
+  "net_out_mb": 0.1
+}
+```
+Indexes:
+- `{ app_id: 1, timestamp: -1 }`
+- TTL: 7 days
 
-**NFR-SEC-04** — Secrets stored in the sidecar shall be encrypted at rest using Fernet. The encryption key shall never be stored in the same database as the ciphertext.
+### 8.3 Redis Key Schema
 
-**NFR-SEC-05** — CORS shall be configured with an explicit allowlist (`CORS_ORIGINS`); `allow_origins=["*"]` is not permitted in production.
-
-**NFR-SEC-06** — Container resource limits (memory 512 MB, CPU 1.0 core by default) shall be applied to every container started by gitDeploy to prevent resource exhaustion on the host.
-
-**NFR-SEC-07** — Admin endpoints shall require `role=admin` enforced at the FastAPI dependency level, not merely by convention.
-
-### 4.3 Reliability
-
-**NFR-REL-01** — If a deployment fails at any stage (git, docker build, docker run), the app status shall be set to `error` and the exception shall be logged before being re-raised.
-
-**NFR-REL-02** — Redis failure (connection refused, timeout) shall not abort any API request. All Redis operations shall be wrapped in try/except with silent fallback.
-
-**NFR-REL-03** — Nginx configuration failure shall not abort a deployment. The Nginx manager catches all exceptions and logs a warning.
-
-**NFR-REL-04** — Sidecar key rotation shall be atomic per record. A failure on one record shall not prevent rotation of the remaining records.
-
-### 4.4 Scalability
-
-**NFR-SCALE-01** — The system shall support up to 55 535 simultaneously deployed apps (one per port in the 10000–65535 range) on a single host, subject to hardware limits.
-
-**NFR-SCALE-02** — Multiple API workers can be run (`uvicorn --workers N`) when using PostgreSQL as the database. SQLite does not support multi-writer concurrency.
-
-**NFR-SCALE-03** — Database schema changes shall be managed through Alembic migrations to support seamless upgrades.
-
-### 4.5 Maintainability
-
-**NFR-MAINT-01** — All application configuration shall be read from environment variables via `Config` class. No configuration values shall be hardcoded in service or route modules.
-
-**NFR-MAINT-02** — All new error types shall be added as `AppBaseError` subclasses with a unique error code in the appropriate range.
-
-**NFR-MAINT-03** — Structured logging shall be used throughout (`logging.getLogger(__name__)`). Log lines shall include timestamp, level, logger name, and message.
-
-### 4.6 Portability
-
-**NFR-PORT-01** — The system shall run on any POSIX-compatible Linux distribution where Python 3.12+, Docker, and Git are available.
-
-**NFR-PORT-02** — The database backend shall be switchable between SQLite and PostgreSQL by changing `DB_URL` without modifying application code.
+| Key | Type | Purpose | TTL |
+|-----|------|---------|-----|
+| `otp:{user_id}:{purpose}` | String | OTP code | 10 min |
+| `blacklist:{jti}` | String | Revoked JWT | Remaining token lifetime |
+| `rate:{ip}:{endpoint}` | INCR counter | Sliding window rate limit | 60s |
+| `port_lock:{port}` | SETNX | Distributed port allocation lock | 10s |
+| `pubsub:logs:{app_id}` | Pub/Sub channel | Celery → WS handler log fan-out | N/A |
+| `pubsub:metrics:{app_id}` | Pub/Sub channel | Celery → WS handler metrics fan-out | N/A |
 
 ---
 
-## 5. System Constraints
+## 9. API Design
 
-**SC-01** — Only public GitHub repositories are supported. Private repositories require OAuth tokens which are not implemented in this version.
+Base: `/api/v1`
 
-**SC-02** — Git and Docker must be installed as system binaries accessible on PATH by the user running the API process.
+### Auth
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/auth/register` | Public | Create account |
+| POST | `/auth/login` | Public | Returns access + refresh tokens |
+| POST | `/auth/refresh` | Refresh token | New access token |
+| POST | `/auth/verify-otp` | Public | Email verification |
+| POST | `/auth/forgot-password` | Public | Send password reset OTP |
+| POST | `/auth/reset-password` | OTP + new password | Set new password |
+| POST | `/auth/logout` | Bearer | Blacklist refresh token |
 
-**SC-03** — The system requires outbound HTTPS access to `api.github.com` on port 443 for repository validation. Deployments fail if this endpoint is unreachable.
+### Apps
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/apps/` | Bearer | Create app |
+| GET | `/apps/` | Bearer | List own apps (paginated, ?status=running) |
+| GET | `/apps/{id}` | Bearer | App detail |
+| PATCH | `/apps/{id}` | Bearer | Update config fields |
+| DELETE | `/apps/{id}` | Bearer | Full cleanup |
+| POST | `/apps/{id}/deploy` | Bearer | Trigger deploy pipeline |
+| POST | `/apps/{id}/restart` | Bearer | Restart container |
+| POST | `/apps/{id}/stop` | Bearer | Stop container |
 
-**SC-04** — Nginx subdomain routing requires wildcard DNS (`*.yourdomain.com → server_ip`) to be configured externally (in DNS provider or Cloudflare).
+### Subdomains
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/subdomains/check?name=x` | Bearer | `{ "available": true }` |
+| PATCH | `/apps/{id}/subdomain` | Bearer | Change subdomain |
 
-**SC-05** — The sidecar service uses a separate SQLite database. In a multi-process deployment, the sidecar must run as a single process to avoid SQLite write contention.
+### Logs
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/apps/{id}/deployments` | Bearer | Deploy history list |
+| GET | `/apps/{id}/deployments/{n}/logs` | Bearer | Step logs for deploy #n |
+| GET | `/apps/{id}/logs?from=&to=&limit=&cursor=` | Bearer | Container log query |
 
-**SC-06** — Container log rotation defaults are `--log-opt max-size=10m --log-opt max-file=3`. These are applied at container start time and cannot be changed without recreating the container.
+### Metrics
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/metrics/host` | Bearer | Current host snapshot |
+| GET | `/apps/{id}/metrics` | Bearer | Current container snapshot |
+| GET | `/apps/{id}/metrics/history?window=1h` | Bearer | Historical from MongoDB |
+
+### Admin
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/admin/users` | ADMIN | All users |
+| PATCH | `/admin/users/{id}` | ADMIN | Enable/disable |
+| GET | `/admin/apps` | ADMIN | All apps |
+| POST | `/admin/apps/{id}/force-stop` | ADMIN | Force stop |
+
+### Error Response (consistent across all endpoints)
+```json
+{
+  "error": "APP_NOT_FOUND",
+  "detail": "App with id=42 does not exist or does not belong to you.",
+  "request_id": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
 
 ---
 
-## 6. External Interface Requirements
+## 10. WebSocket Design
 
-### 6.1 User Interfaces
+Auth: pass JWT as query param `?token={access_token}` (browsers can't set WS headers).
 
-The React 19 frontend is specified in `docs/FRONTEND_SPEC.md`. Key UI requirements:
+### `/ws/metrics/host` — Host-level metrics (all authenticated users)
+Pushed every 5s by a background asyncio task.
+```json
+{
+  "type": "host_metrics",
+  "timestamp": "2026-04-29T10:00:00Z",
+  "cpu": { "percent": 34.2, "count": 4 },
+  "memory": { "total_mb": 8192, "used_mb": 4200, "percent": 51.3 },
+  "disk": { "total_gb": 100, "used_gb": 42.1, "percent": 42.1 },
+  "network": { "bytes_sent_mb": 1024.5, "bytes_recv_mb": 3200.1 }
+}
+```
 
-- The dashboard shall show all user apps with their current status in real time (polling or WebSocket).
-- The deploy form shall accept GitHub URL, container port, branch, Dockerfile path, source directory, and env vars.
-- The admin panel shall be accessible only to users with `role=admin` and shall display all tables defined in Section 3.3.
-- The UI shall automatically refresh access tokens using the refresh cookie before expiry.
+### `/ws/apps/{id}/metrics` — Per-container metrics (owner only)
+Source: Redis Pub/Sub `pubsub:metrics:{app_id}`. Published by `snapshot_metrics_task`.
+```json
+{
+  "type": "container_metrics",
+  "app_id": 42,
+  "timestamp": "2026-04-29T10:00:00Z",
+  "cpu_percent": 12.4,
+  "memory_mb": 128.3,
+  "memory_limit_mb": 512.0,
+  "net_in_mb": 0.2,
+  "net_out_mb": 0.1
+}
+```
 
-### 6.2 REST API Interface
+### `/ws/apps/{id}/logs` — Live container log stream (owner only)
+Source: Redis Pub/Sub `pubsub:logs:{app_id}`. Published by `log_tail_task` (Celery).
+```json
+{
+  "type": "log_line",
+  "stream": "stdout",
+  "message": "Server listening on port 3000",
+  "timestamp": "2026-04-29T10:00:01Z"
+}
+```
 
-All endpoints accept and return `application/json`. Authentication is via `Authorization: Bearer <access_token>` header except for public auth endpoints and cookie-driven refresh.
+### Why Redis Pub/Sub as the Bridge
+```
+Celery worker: docker logs -f {container_id}
+  → for each line: redis.publish("pubsub:logs:{app_id}", json)
 
-Full endpoint reference is in the README.md API Overview table and in the Swagger UI at `/docs`.
+FastAPI WS handler:
+  → subscriber = await redis.subscribe("pubsub:logs:{app_id}")
+  → async for message in subscriber: await ws.send_text(message)
+```
 
-### 6.3 Secret Manager Sidecar Interface
+This keeps the API server **stateless** — it holds no subprocesses. Multiple browser tabs subscribe to the same channel independently. This is how Slack, Discord, and similar systems fan-out messages to many connected clients.
 
-The sidecar exposes a REST API on `SIDECAR_URL` (default `http://localhost:8001`). All non-health endpoints require `X-Api-Key: <SIDECAR_API_KEY>` header. The main API communicates with the sidecar via HTTP; no shared database or IPC.
+---
 
-### 6.4 GitHub API Interface
+## 11. Deployment Pipeline Design
 
-The system calls `GET https://api.github.com/repos/{owner}/{repo}` with a 5-second timeout to validate each repository URL. The response's `private` field is checked; private repos are rejected with error 1006. Non-200 responses other than 404 raise error 1005.
+### Deploy = Celery Chain
 
-### 6.5 Docker CLI Interface
+```
+POST /apps/{id}/deploy
+  → deploy_service.trigger(app_id) → enqueues Celery chain → returns { "task_id": "..." }
 
-Docker operations are performed by spawning subprocess commands:
+chain(
+  clone_or_pull.s(app_id),
+  docker_build.s(app_id),
+  allocate_and_run.s(app_id),
+  nginx_setup.s(app_id)
+)
+```
 
-- `docker build` — with `-t` (two tags), `--label`, `--progress plain`, `-f` (Dockerfile path), optional `--no-cache`, optional `--build-arg`
-- `docker run` — with `-d`, `--name`, `-p`, `--restart`, `--memory`, `--cpus`, `--log-driver json-file`, `--log-opt`, optional `-e`
-- `docker rm -f` — remove container by ID
-- `docker rmi -f` — remove image by ID
-- `docker ps -a -q -f name=` — check if a container exists
-- `docker images -q` — check if an image exists
+If any task raises, the chain stops. The `on_failure` handler for each task sets `app.status = ERROR`.
 
-### 6.6 Nginx Interface
+### Per-Step Behavior
 
-When `NGINX_ENABLED=true`, the system writes files to `NGINX_CONF_DIR` (default `/etc/nginx/gitdeploy.d`). The main Nginx config must contain an `include /etc/nginx/gitdeploy.d/*.conf;` directive. When `NGINX_AUTO_RELOAD=true`, `nginx -s reload` is executed via subprocess after each write or remove.
+| Step | On Success | On Failure |
+|------|------------|------------|
+| `clone_or_pull` | status = PREPARED | status = ERROR, log reason |
+| `docker_build` | image ready in local registry | status = ERROR |
+| `allocate_and_run` | port assigned, container_id stored, status = RUNNING | status = ERROR, port released |
+| `nginx_setup` | conf written + nginx reloaded | WARNING log only — app still runs |
 
-### 6.7 Redis Interface
+Each task bookends a `deployment_log` row: one row at START (status=started), updated at END (status=success/failed, duration_ms).
 
-Redis is accessed via the `redis.asyncio` client. The connection is initialised by `init_redis(url)` during application startup. All keys are namespaced under `gitdeploy:`. The interface exposes four operations: `redis_get`, `redis_set`, `redis_delete`, and `redis_incr`.
+### Port Allocation — Concurrency Safety (Interview Question)
+This is a classic **distributed locking** problem:
+
+1. `SELECT internal_port FROM apps WHERE internal_port IS NOT NULL FOR UPDATE SKIP LOCKED`
+   — PostgreSQL row-level lock prevents two concurrent transactions from reading the same set of used ports
+2. Scan 10000–65535, skip used ports
+3. `SETNX port_lock:{port} 1 EX 10` — Redis distributed lock as secondary guard
+4. `socket.bind(("0.0.0.0", port))` — OS-level final check
+5. `COMMIT` — port durably assigned
+
+Why three checks? Defense in depth. DB lock handles concurrency. Redis SETNX handles the window between DB check and commit. Socket check handles OS-level surprises.
+
+---
+
+## 12. Logging System Design
+
+### Three Separate Concerns
+
+| Log Type | Storage | Who Writes It | Who Queries It |
+|----------|---------|--------------|----------------|
+| Application logs (internal events) | stdout → Docker/systemd | Python `logging` middleware | Ops team (Grafana Loki, etc.) |
+| Deployment audit logs | PostgreSQL `deployment_logs` | Celery tasks | Users via API |
+| Container runtime logs | MongoDB `container_logs` | Celery `log_tail_task` | Users via API + WS |
+
+### Application Log Format (NFR-OBS-01)
+Using `python-json-logger`:
+```json
+{
+  "timestamp": "2026-04-29T10:00:00.123Z",
+  "level": "INFO",
+  "logger": "app.services.deploy_service",
+  "request_id": "550e8400-e29b-41d4-a716-446655440000",
+  "user_id": 42,
+  "message": "Deploy triggered for app_id=7",
+  "app_id": 7
+}
+```
+
+### Correlation ID Pattern
+```python
+# core/logging.py
+request_id_var: ContextVar[str] = ContextVar("request_id", default="")
+
+# core/middleware.py — RequestIDMiddleware
+async def dispatch(self, request, call_next):
+    rid = str(uuid4())
+    request_id_var.set(rid)
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = rid
+    return response
+
+# In any service function:
+logger.info("Deploying", extra={"request_id": request_id_var.get(), "user_id": user_id})
+```
+
+The `request_id` flows automatically through every log call in the same request — no need to pass it as a function argument.
+
+### Container Log Query (Cursor Pagination)
+```
+GET /apps/{id}/logs?from=2026-04-29T00:00Z&to=2026-04-29T23:59Z&limit=200&cursor={last_objectid}
+```
+- Cursor = last `_id` from previous page.
+- Query: `find({ app_id: {id}, timestamp: { $gte: from, $lte: to }, _id: { $gt: cursor } }).limit(200)`
+- Returns `{ logs: [...], next_cursor: "..." | null }`
+
+**Why cursor and not offset?** `skip(offset)` in MongoDB scans all skipped documents — O(n). Cursor-based pagination using `_id` is O(log n) via index traversal.
+
+---
+
+## 13. Subdomain Management
+
+### Validation
+```python
+import re
+SUBDOMAIN_RE = re.compile(r'^[a-z0-9][a-z0-9\-]{1,61}[a-z0-9]$')
+RESERVED = {"www", "api", "admin", "mail", "ftp", "smtp", "static", "assets", "docs"}
+```
+
+### Change Flow
+1. Client: `GET /subdomains/check?name=myapp` → `{ "available": true }`
+2. Client: `PATCH /apps/{id}/subdomain { "subdomain": "myapp" }`
+3. Server:
+   - Validate regex → 422 if fails
+   - Check reserved list → 400 if reserved
+   - `SELECT COUNT(*) FROM apps WHERE subdomain='myapp' AND id != {id}` → 409 if taken
+   - `SELECT status FROM apps WHERE id={id}` → 409 "stop the app first" if RUNNING
+   - Atomic: update DB → remove old conf → write new conf → `nginx -s reload`
+
+---
+
+## 14. Security Design
+
+### Auth Token Flow
+```
+Login → access_token (15min, contains user_id + role + jti)
+      + refresh_token (7 days, stored hash in Redis: user:{id}:refresh)
+
+Each request: Authorization: Bearer {access_token}
+Expired access: POST /auth/refresh → new access_token
+Logout: jti → Redis blacklist (TTL = remaining access_token lifetime)
+```
+
+**Why short access + long refresh?**
+Access token is stateless — validated by signature, no DB lookup. If stolen: 15min damage window.
+Refresh token is long-lived but server-tracked in Redis — immediately revocable.
+
+### Attack Surface Summary
+
+| Input | Threat | Mitigation |
+|-------|--------|-----------|
+| `repo_url` | SSRF (target internal IPs) | Must start with `https://github.com/`, GitHub API validates before git clone |
+| `subdomain` | Nginx config injection | Server-side `^[a-z0-9][a-z0-9\-]{1,61}[a-z0-9]$` regex before any file write |
+| `env` values | Stored and executed | Stored in JSONB, passed via `docker run --env` (not shell-interpolated) |
+| `container_port` | Claim system port | `CHECK(container_port BETWEEN 1024 AND 65535)` at DB level |
+| Login endpoint | Brute force | Rate limit: 5 attempts per IP per minute via Redis sliding window |
+
+---
+
+## 15. Tech Stack Decisions
+
+### FastAPI vs Django — Keep FastAPI
+
+**The reasoning:**
+- gitDeploy is fundamentally async: WebSocket connections held open for minutes, docker/git subprocess calls, concurrent deploys.
+- Django's ORM is synchronous. Django Channels adds WebSocket support but requires you to fight the synchronous default.
+- FastAPI + SQLAlchemy 2.0 async + asyncpg gives you a fully async stack with zero compromises.
+- Pydantic v2 integration is native to FastAPI.
+
+**Interview answer:** "FastAPI is the right choice for an I/O-heavy, API-only service with WebSocket requirements. Django would be better if I needed its built-in admin panel, ORM migrations, or was building a server-rendered app. For a PaaS backend, FastAPI's async-first design is a better fit."
+
+### SQLite → PostgreSQL
+- SQLite: single writer lock → concurrent Celery worker + API writes cause lock timeouts.
+- PostgreSQL: MVCC handles concurrent writes at the row level without contention.
+- asyncpg is also ~2–3x faster than aiosqlite.
+
+### Adding MongoDB
+- Logs are append-only, variable-length, naturally expiring, potentially high-volume (thousands of lines per deploy).
+- MongoDB's TTL index handles automatic purge without a cron job.
+- Querying by time range with `{ app_id: 1, timestamp: -1 }` index is fast.
+- Forcing this into PostgreSQL TEXT columns would work but fights the engine.
+
+### Adding Celery
+- Current v1: deploy runs inline in async route → server restart = silent deploy drop.
+- Celery: tasks survive broker restart (persistent queue), are retryable, and monitorable via Flower.
+- Workers are independently scalable — add more workers on the same machine or separate machines.
+
+---
+
+## 16. Glossary
+
+| Term | Definition |
+|------|------------|
+| App | A user's deployed GitHub repo, one row in `apps` table |
+| Internal Port | The host OS port that maps to the container (10000–65535, allocated per deploy) |
+| Container Port | The port the application inside the container listens on (user-specified) |
+| Subdomain | The `{name}.gitdeploy.online` hostname for an app |
+| Deploy | The full pipeline: clone → build → run → nginx configure |
+| Celery Chain | Sequential Celery tasks where failure stops the chain |
+| Fan-Out | Redis Pub/Sub pattern: one publisher, many subscribers get the same message |
+| Pub/Sub | Redis publish/subscribe — producer publishes to a channel, subscribers receive |
+| WS | WebSocket — persistent full-duplex connection between browser and server |
+| Celery Beat | Celery's built-in cron scheduler (used for log purge, metrics snapshots) |
+| TTL Index | MongoDB index that auto-deletes documents after a specified duration |
+| jti | JWT ID — unique per-token claim, used to blacklist tokens on logout |
+| MVCC | Multi-Version Concurrency Control — PostgreSQL's method for non-blocking concurrent reads/writes |
+| Cursor Pagination | Pagination using last-seen ID as a pointer (O(log n) vs offset's O(n)) |
+| asyncpg | High-performance async PostgreSQL driver |
+| Motor | Official async MongoDB driver for Python |
+| ContextVar | Python 3.7+ mechanism for async-context-local variables (like request_id) |
